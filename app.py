@@ -3,11 +3,14 @@ import pandas as pd
 import numpy as np
 from catboost import CatBoostRegressor
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import mean_absolute_error, r2_score, mean_squared_error
 import optuna
 import logging
 from typing import Dict, List, Tuple, Optional
 import warnings
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +33,11 @@ h2, h3 { font-family: 'Comic Sans MS', cursive, sans-serif; color: #ad1457; }
 .stButton>button:hover { background-position: right center; box-shadow: 0 4px 15px 0 rgba(233, 30, 99, 0.75); }
 .stExpander { border: 2px solid #f8bbd0; border-radius: 10px; background-color: #fff1f8; }
 .metric-card { padding: 10px; border-radius: 10px; background-color: #fff1f8; border: 1px solid #f8bbd0; }
+.prediction-card { 
+    background: linear-gradient(135deg, #fff1f8 0%, #fce4ec 100%);
+    padding: 20px; border-radius: 15px; border: 2px solid #f8bbd0;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,7 +70,7 @@ def safe_index_selection(columns, default_index: int = 0) -> int:
 
 @st.cache_data
 def load_data(file) -> Optional[pd.DataFrame]:
-    """Безопасная загрузка данных"""
+    """Улучшенная загрузка данных с обработкой дат"""
     try:
         # Проверка размера файла (максимум 50MB)
         if hasattr(file, 'size') and file.size > 50 * 1024 * 1024:
@@ -71,7 +79,7 @@ def load_data(file) -> Optional[pd.DataFrame]:
             
         if file.name.endswith('.csv'):
             # Пробуем разные кодировки
-            for encoding in ['utf-8', 'cp1251', 'latin1']:
+            for encoding in ['utf-8', 'cp1251', 'latin1', 'utf-8-sig']:
                 try:
                     df = pd.read_csv(file, encoding=encoding)
                     logger.info(f"CSV файл загружен с кодировкой {encoding}")
@@ -81,14 +89,60 @@ def load_data(file) -> Optional[pd.DataFrame]:
             st.error("Не удалось определить кодировку CSV файла")
             return None
         else:
-            df = pd.read_excel(file, engine='openpyxl')
-            logger.info("Excel файл успешно загружен")
-            return df
+            # Для Excel файлов с принудительным типом даты
+            try:
+                df = pd.read_excel(file, engine='openpyxl')
+                logger.info("Excel файл успешно загружен")
+                return df
+            except Exception as e:
+                # Попытка с другими движками
+                try:
+                    df = pd.read_excel(file, engine='xlrd')
+                    logger.info("Excel файл загружен с xlrd")
+                    return df
+                except:
+                    raise e
             
     except Exception as e:
         st.error(f"Ошибка при загрузке файла: {str(e)}")
         logger.error(f"Ошибка загрузки файла: {e}")
         return None
+
+def parse_dates_robust(df: pd.DataFrame, date_col: str) -> pd.DataFrame:
+    """Робустная обработка дат с принудительным преобразованием"""
+    df = df.copy()
+    
+    # Сначала пытаемся стандартное преобразование
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    
+    # Если много NaT, пробуем разные форматы
+    if df[date_col].isna().sum() > len(df) * 0.1:  # Если >10% не распознались
+        st.warning("⚠️ Обнаружены проблемы с форматом дат. Применяем дополнительную обработку...")
+        
+        # Пробуем различные форматы
+        date_formats = [
+            '%Y-%m-%d', '%d.%m.%Y', '%d/%m/%Y', '%m/%d/%Y',
+            '%Y-%m-%d %H:%M:%S', '%d.%m.%Y %H:%M:%S',
+            '%d-%m-%Y', '%Y/%m/%d'
+        ]
+        
+        original_col = f"{date_col}_original"
+        df[original_col] = df[date_col]
+        
+        for fmt in date_formats:
+            mask = df[date_col].isna()
+            if mask.sum() == 0:
+                break
+            try:
+                df.loc[mask, date_col] = pd.to_datetime(
+                    df.loc[mask, original_col], format=fmt, errors='coerce'
+                )
+            except:
+                continue
+        
+        df.drop(columns=[original_col], inplace=True)
+    
+    return df
 
 @st.cache_data
 def process_and_aggregate(
@@ -116,8 +170,8 @@ def process_and_aggregate(
     
     initial_rows = len(df)
     
-    # Обработка дат с улучшенной диагностикой
-    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    # Робастная обработка дат
+    df = parse_dates_robust(df, 'date')
     bad_date_rows = df['date'].isna().sum()
     df.dropna(subset=['date'], inplace=True)
     
@@ -129,13 +183,17 @@ def process_and_aggregate(
     df = df[df['Qty'] > 0]  # Количество должно быть положительным
     df = df[df['Price'] > 0]  # Цена должна быть положительной
     
-    # Удаление выбросов по количеству (квантили 1% и 99%)
-    qty_q1, qty_q99 = df['Qty'].quantile([0.01, 0.99])
-    df = df[(df['Qty'] >= qty_q1) & (df['Qty'] <= qty_q99)]
+    # Улучшенное удаление выбросов с использованием IQR
+    def remove_outliers_iqr(data, column):
+        Q1 = data[column].quantile(0.25)
+        Q3 = data[column].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        return data[(data[column] >= lower_bound) & (data[column] <= upper_bound)]
     
-    # Удаление выбросов по цене
-    price_q1, price_q99 = df['Price'].quantile([0.01, 0.99])
-    df = df[(df['Price'] >= price_q1) & (df['Price'] <= price_q99)]
+    df = remove_outliers_iqr(df, 'Qty')
+    df = remove_outliers_iqr(df, 'Price')
     
     # Сортировка и группировка
     df = df.sort_values(by=['Art', 'Magazin', 'date'])
@@ -152,14 +210,39 @@ def process_and_aggregate(
         df_merged['date'] <= (df_merged['first_sale_date'] + pd.Timedelta(days=30))
     ].copy()
     
-    # Агрегация данных
-    agg_logic = {'Qty': 'sum', 'Price': 'mean'}
+    # Добавляем дополнительные признаки
+    df_30_days['days_since_launch'] = (df_30_days['date'] - df_30_days['first_sale_date']).dt.days
+    df_30_days['revenue'] = df_30_days['Qty'] * df_30_days['Price']
+    
+    # Агрегация данных с дополнительными метриками
+    agg_logic = {
+        'Qty': ['sum', 'mean', 'std'],
+        'Price': ['mean', 'std'],
+        'revenue': 'sum',
+        'days_since_launch': 'max'
+    }
+    
     for cat_col in cat_features:
         if cat_col in df_30_days.columns:
             agg_logic[cat_col] = 'first'
     
     df_agg = df_30_days.groupby(['Art', 'Magazin'], as_index=False).agg(agg_logic)
-    df_agg.rename(columns={'Qty': 'Qty_30_days'}, inplace=True)
+    
+    # Сглаживание названий колонок
+    df_agg.columns = ['_'.join(col).strip() if col[1] else col[0] for col in df_agg.columns.values]
+    df_agg.rename(columns={
+        'Qty_sum': 'Qty_30_days',
+        'Qty_mean': 'Avg_daily_qty',
+        'Qty_std': 'Qty_volatility',
+        'Price_mean': 'Price',
+        'Price_std': 'Price_volatility',
+        'revenue_sum': 'Total_revenue_30_days',
+        'days_since_launch_max': 'Days_in_sale'
+    }, inplace=True)
+    
+    # Заполняем NaN значения
+    df_agg['Qty_volatility'] = df_agg['Qty_volatility'].fillna(0)
+    df_agg['Price_volatility'] = df_agg['Price_volatility'].fillna(0)
     
     # Статистика обработки
     stats = {
@@ -168,7 +251,13 @@ def process_and_aggregate(
         "bad_date_rows": bad_date_rows,
         "outliers_removed": initial_rows - len(df_30_days),
         "unique_products": df_agg['Art'].nunique(),
-        "unique_stores": df_agg['Magazin'].nunique()
+        "unique_stores": df_agg['Magazin'].nunique(),
+        "date_range": {
+            "start": df['date'].min(),
+            "end": df['date'].max()
+        },
+        "avg_price": df_agg['Price'].mean(),
+        "total_revenue": df_agg['Total_revenue_30_days'].sum()
     }
     
     logger.info(f"Данные обработаны: {initial_rows} -> {len(df_agg)} строк")
@@ -181,14 +270,20 @@ def train_model_with_optuna(
     cat_features: Tuple[str, ...],
     n_trials: int = 50
 ) -> Tuple[CatBoostRegressor, List[str], Dict]:
-    """Улучшенное обучение модели с Optuna"""
+    """Улучшенное обучение модели с расширенным набором признаков"""
     
     cat_features_list = list(cat_features)
     target = 'Qty_30_days'
-    features = ['Magazin', 'Price'] + cat_features_list
+    
+    # Расширенный набор признаков
+    base_features = ['Magazin', 'Price', 'Avg_daily_qty', 'Price_volatility', 'Days_in_sale']
+    features = base_features + cat_features_list
+    
+    # Фильтруем признаки, которые есть в данных
+    available_features = [f for f in features if f in _df_agg.columns]
     
     # Подготовка данных
-    df_processed = _df_agg[features + [target]].copy()
+    df_processed = _df_agg[available_features + [target]].copy()
     all_cat_features = ['Magazin'] + cat_features_list
     
     # Преобразование категориальных признаков
@@ -196,35 +291,38 @@ def train_model_with_optuna(
         if col in df_processed.columns:
             df_processed[col] = df_processed[col].astype(str)
     
-    X, y = df_processed[features], df_processed[target]
+    X, y = df_processed[available_features], df_processed[target]
     
     # Проверка размера данных
     if len(X) < 50:
         st.warning("⚠️ Мало данных для качественного обучения модели (рекомендуется >50 записей)")
     
-    # Разделение данных
-    test_size = min(0.25, max(0.1, 20 / len(X)))  # Адаптивный размер тестовой выборки
+    # Адаптивное разделение данных
+    test_size = min(0.25, max(0.1, 20 / len(X)))
     X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=test_size, random_state=42
+        X, y, test_size=test_size, random_state=42, stratify=None
     )
     
     # Оптимизация гиперпараметров
     def objective(trial):
         params = {
-            'iterations': trial.suggest_int('iterations', 500, 1500),
+            'iterations': trial.suggest_int('iterations', 300, 1000),
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-            'depth': trial.suggest_int('depth', 4, 10),
+            'depth': trial.suggest_int('depth', 4, 8),
             'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
-            'border_count': trial.suggest_int('border_count', 32, 255),
+            'border_count': trial.suggest_int('border_count', 32, 128),
+            'bagging_temperature': trial.suggest_float('bagging_temperature', 0, 1),
+            'random_strength': trial.suggest_float('random_strength', 0, 10),
             'verbose': False,
-            'random_seed': 42
+            'random_seed': 42,
+            'loss_function': 'RMSE'
         }
         
         try:
             model = CatBoostRegressor(**params)
             model.fit(
                 X_train, y_train, 
-                cat_features=all_cat_features,
+                cat_features=[f for f in all_cat_features if f in available_features],
                 eval_set=(X_test, y_test),
                 early_stopping_rounds=50,
                 use_best_model=True,
@@ -247,7 +345,7 @@ def train_model_with_optuna(
         study.optimize(objective, n_trials=1)
         progress = (i + 1) / n_trials
         progress_bar.progress(progress)
-        status_text.text(f"Оптимизация: {i+1}/{n_trials} попыток")
+        status_text.text(f"Оптимизация: {i+1}/{n_trials} попыток (лучший MAE: {study.best_value:.2f})")
     
     progress_bar.empty()
     status_text.empty()
@@ -258,68 +356,113 @@ def train_model_with_optuna(
     best_params['random_seed'] = 42
     
     final_model = CatBoostRegressor(**best_params)
-    final_model.fit(X, y, cat_features=all_cat_features, verbose=False)
+    final_model.fit(
+        X, y, 
+        cat_features=[f for f in all_cat_features if f in available_features], 
+        verbose=False
+    )
     
-    # Метрики качества
+    # Расширенные метрики качества
     test_preds = final_model.predict(X_test)
+    train_preds = final_model.predict(X_train)
+    
     metrics = {
-        'MAE': mean_absolute_error(y_test, test_preds),
-        'R2': r2_score(y_test, test_preds),
-        'best_params': best_params
+        'MAE_test': mean_absolute_error(y_test, test_preds),
+        'MAE_train': mean_absolute_error(y_train, train_preds),
+        'RMSE_test': np.sqrt(mean_squared_error(y_test, test_preds)),
+        'R2_test': r2_score(y_test, test_preds),
+        'R2_train': r2_score(y_train, train_preds),
+        'best_params': best_params,
+        'feature_importance': dict(zip(available_features, final_model.feature_importances_)),
+        'overfit_ratio': mean_absolute_error(y_train, train_preds) / mean_absolute_error(y_test, test_preds)
     }
     
-    logger.info(f"Модель обучена. MAE: {metrics['MAE']:.2f}, R²: {metrics['R2']:.2f}")
+    logger.info(f"Модель обучена. MAE: {metrics['MAE_test']:.2f}, R²: {metrics['R2_test']:.2f}")
     
-    return final_model, features, metrics
+    return final_model, available_features, metrics
 
 def create_prediction_form(cat_features: List[str], df_agg: pd.DataFrame) -> Tuple[bool, Dict]:
-    """Создание улучшенной формы для прогнозирования"""
+    """Улучшенная форма для прогнозирования с валидацией"""
     
     st.subheader("✍️ Опишите характеристики новой модели")
     
     with st.form("prediction_form"):
         new_product_data = {}
         
-        # Динамическое создание колонок
-        n_features = len(cat_features)
-        n_cols = min(3, max(1, n_features))
-        cols = st.columns(n_cols)
+        # Создаем две колонки для лучшего размещения
+        col1, col2 = st.columns(2)
         
-        # Поля для категориальных признаков
-        for i, feature in enumerate(cat_features):
-            with cols[i % n_cols]:
+        # Левая колонка - категориальные признаки
+        with col1:
+            st.markdown("**Характеристики товара:**")
+            for feature in cat_features:
                 if feature in df_agg.columns:
-                    # Получаем топ значений для подсказки
                     top_values = df_agg[feature].value_counts().head(5).index.tolist()
-                    help_text = f"Популярные: {', '.join(map(str, top_values[:3]))}"
+                    help_text = f"Популярные: {', '.join(map(str, top_values[:3]))}" if top_values else None
                     placeholder = f"Например: {top_values[0]}" if top_values else "Введите значение"
                     
                     new_product_data[feature] = st.text_input(
                         f"{feature} ✨",
                         help=help_text,
-                        placeholder=placeholder
+                        placeholder=placeholder,
+                        key=f"input_{feature}"
                     )
-                else:
-                    new_product_data[feature] = st.text_input(f"{feature} ✨")
         
-        # Поле для цены
-        if 'Price' in df_agg.columns:
-            price_stats = df_agg['Price'].describe()
-            price_mean = float(price_stats['mean'])
-            price_min = float(price_stats['min'])
-            price_max = float(price_stats['max'])
+        # Правая колонка - численные параметры
+        with col2:
+            st.markdown("**Параметры продаж:**")
             
-            with cols[n_features % n_cols]:
+            # Поле для цены
+            if 'Price' in df_agg.columns:
+                price_stats = df_agg['Price'].describe()
+                price_mean = float(price_stats['mean'])
+                price_min = max(1.0, float(price_stats['min']))
+                price_max = float(price_stats['max'])
+                
                 new_product_data['Price'] = st.number_input(
                     "Цена 💰",
-                    min_value=0.0,
+                    min_value=price_min,
+                    max_value=price_max * 2,
                     value=price_mean,
                     step=max(1.0, price_mean * 0.05),
                     format="%.2f",
                     help=f"Диапазон цен в данных: {price_min:.0f} - {price_max:.0f}"
                 )
+            
+            # Дополнительные параметры для более точного прогноза
+            if 'Avg_daily_qty' in df_agg.columns:
+                avg_daily_mean = float(df_agg['Avg_daily_qty'].mean())
+                new_product_data['Avg_daily_qty'] = st.number_input(
+                    "Ожидаемые ежедневные продажи",
+                    min_value=0.1,
+                    value=avg_daily_mean,
+                    step=0.1,
+                    format="%.1f",
+                    help="Предполагаемое среднее количество продаж в день"
+                )
+            
+            new_product_data['Days_in_sale'] = st.slider(
+                "Дни в продаже",
+                min_value=1,
+                max_value=30,
+                value=30,
+                help="Количество дней, которое товар будет в продаже"
+            )
+            
+            new_product_data['Price_volatility'] = st.number_input(
+                "Волатильность цены",
+                min_value=0.0,
+                value=0.0,
+                step=0.1,
+                help="Стандартное отклонение цены (0 = стабильная цена)"
+            )
         
-        submitted = st.form_submit_button("🔮 Создать прогноз продаж!")
+        # Кнопка прогнозирования
+        submitted = st.form_submit_button(
+            "🔮 Создать прогноз продаж!",
+            type="primary",
+            use_container_width=True
+        )
         
         return submitted, new_product_data
 
@@ -329,13 +472,14 @@ def make_predictions(
     new_product_data: Dict, 
     df_agg: pd.DataFrame
 ) -> pd.DataFrame:
-    """Создание прогнозов для всех магазинов"""
+    """Улучшенное создание прогнозов с доверительными интервалами"""
     
     # Валидация входных данных
     for key, value in new_product_data.items():
-        if key != 'Price' and (pd.isna(value) or str(value).strip() == ""):
-            st.error(f"⚠️ Поле '{key}' не может быть пустым!")
-            return pd.DataFrame()
+        if key not in ['Price', 'Avg_daily_qty', 'Days_in_sale', 'Price_volatility']:
+            if pd.isna(value) or str(value).strip() == "":
+                st.error(f"⚠️ Поле '{key}' не может быть пустым!")
+                return pd.DataFrame()
     
     # Создание данных для прогноза
     magaziny = df_agg['Magazin'].unique()
@@ -346,14 +490,23 @@ def make_predictions(
         row['Magazin'] = magazin
         predictions_data.append(row)
     
-    predictions_df = pd.DataFrame(predictions_data)[features]
+    predictions_df = pd.DataFrame(predictions_data)
+    
+    # Фильтруем только доступные признаки
+    available_features = [f for f in features if f in predictions_df.columns]
+    predictions_df_filtered = predictions_df[available_features]
     
     # Получение прогнозов
     try:
-        raw_predictions = model.predict(predictions_df)
+        raw_predictions = model.predict(predictions_df_filtered)
         predictions_df['Pred_Qty_30_days'] = np.maximum(0, np.round(raw_predictions, 0))
         
-        # Расчет рейтинга
+        # Расчет доверительного интервала (простой подход)
+        predictions_std = raw_predictions.std()
+        predictions_df['Pred_Min'] = np.maximum(0, np.round(raw_predictions - 1.96 * predictions_std, 0))
+        predictions_df['Pred_Max'] = np.round(raw_predictions + 1.96 * predictions_std, 0)
+        
+        # Расчет рейтинга и категорий
         max_pred = predictions_df['Pred_Qty_30_days'].max()
         if max_pred > 0:
             predictions_df['Rating_%'] = np.round(
@@ -362,14 +515,42 @@ def make_predictions(
         else:
             predictions_df['Rating_%'] = 0
         
+        # Категории магазинов
+        def categorize_performance(rating):
+            if rating >= 80:
+                return "🔥 Хит продаж"
+            elif rating >= 60:
+                return "⭐ Хорошие продажи"
+            elif rating >= 40:
+                return "📈 Средние продажи"
+            else:
+                return "🔧 Требует внимания"
+        
+        predictions_df['Category'] = predictions_df['Rating_%'].apply(categorize_performance)
+        
+        # Расчет потенциальной выручки
+        if 'Price' in new_product_data:
+            predictions_df['Potential_Revenue'] = predictions_df['Pred_Qty_30_days'] * new_product_data['Price']
+        
         # Сортировка по убыванию прогноза
         result_df = predictions_df.sort_values(
             by='Pred_Qty_30_days', ascending=False
-        ).rename(columns={
+        )
+        
+        # Переименование колонок для отображения
+        rename_dict = {
             'Magazin': 'Бутик',
-            'Pred_Qty_30_days': 'Прогноз продаж (30 дней, шт.)',
-            'Rating_%': 'Рейтинг успеха (%)'
-        })
+            'Pred_Qty_30_days': 'Прогноз продаж (шт.)',
+            'Rating_%': 'Рейтинг (%)',
+            'Category': 'Категория',
+            'Pred_Min': 'Мин. прогноз',
+            'Pred_Max': 'Макс. прогноз'
+        }
+        
+        if 'Potential_Revenue' in result_df.columns:
+            rename_dict['Potential_Revenue'] = 'Потенциальная выручка'
+        
+        result_df = result_df.rename(columns=rename_dict)
         
         return result_df
         
@@ -377,6 +558,57 @@ def make_predictions(
         st.error(f"Ошибка при создании прогноза: {str(e)}")
         logger.error(f"Ошибка прогнозирования: {e}")
         return pd.DataFrame()
+
+def create_visualizations(predictions_df: pd.DataFrame, metrics: Dict):
+    """Создание визуализаций результатов"""
+    
+    if predictions_df.empty:
+        return
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # График топ-10 магазинов
+        top_10 = predictions_df.head(10)
+        fig1 = px.bar(
+            top_10, 
+            x='Прогноз продаж (шт.)', 
+            y='Бутик',
+            orientation='h',
+            title="Топ-10 магазинов по прогнозу продаж",
+            color='Рейтинг (%)',
+            color_continuous_scale='viridis'
+        )
+        fig1.update_layout(height=400)
+        st.plotly_chart(fig1, use_container_width=True)
+    
+    with col2:
+        # Распределение по категориям
+        category_counts = predictions_df['Категория'].value_counts()
+        fig2 = px.pie(
+            values=category_counts.values,
+            names=category_counts.index,
+            title="Распределение магазинов по категориям"
+        )
+        fig2.update_layout(height=400)
+        st.plotly_chart(fig2, use_container_width=True)
+    
+    # График важности признаков
+    if 'feature_importance' in metrics:
+        importance_df = pd.DataFrame(
+            list(metrics['feature_importance'].items()),
+            columns=['Признак', 'Важность']
+        ).sort_values('Важность', ascending=True)
+        
+        fig3 = px.bar(
+            importance_df,
+            x='Важность',
+            y='Признак',
+            orientation='h',
+            title="Важность признаков в модели"
+        )
+        fig3.update_layout(height=300)
+        st.plotly_chart(fig3, use_container_width=True)
 
 # --- ОСНОВНОЕ ПРИЛОЖЕНИЕ ---
 
