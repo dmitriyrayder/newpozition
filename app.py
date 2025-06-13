@@ -45,24 +45,18 @@ def auto_detect_column(columns, keywords, default_index=0):
                 return i
     return min(default_index, len(columns) - 1 if columns else 0)
 
-# Также замените и эту функцию для чистоты кода
 def extract_features_from_description(descriptions_str):
     """Упрощенное извлечение признаков из текстового описания.
        Принимает уже очищенную серию строк."""
-    
     features = pd.DataFrame(index=descriptions_str.index)
-    
     extraction_map = {
         'brand_extracted': ['ray-ban', 'oakley', 'gucci', 'prada', 'polaroid'],
         'material_extracted': ['металл', 'пластик', 'дерево', 'комбинированный'],
         'shape_extracted': ['авиатор', 'вайфарер', 'круглые', 'кошачий глаз']
     }
-    
     for feature_name, keywords in extraction_map.items():
         pattern = re.compile(f'({"|".join(keywords)})', re.IGNORECASE)
-        # Просто используем полученную на вход серию
         features[feature_name] = descriptions_str.str.findall(pattern).str[0].str.lower().fillna('не определен')
-        
     return features
 
 @st.cache_data
@@ -71,29 +65,36 @@ def process_data_and_train(_df, column_map, feature_config):
     Основная функция: обрабатывает данные, извлекает признаки, обучает модель.
     """
     df = _df.copy()
-    df.rename(columns={v: k for k, v in column_map.items() if v}, inplace=True)
+    
+    # --- ИСПРАВЛЕННАЯ ЛОГИКА: СНАЧАЛА ИЗВЛЕКАЕМ, ПОТОМ ПЕРЕИМЕНОВЫВАЕМ ---
 
-    df['date'] = pd.to_datetime(df['date'], errors='coerce')
-    df.dropna(subset=['date', 'Art', 'Magazin', 'Qty', 'Price'], inplace=True)
-    df['Price'] = pd.to_numeric(df['Price'], errors='coerce').fillna(0)
-    df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
-
+    # 1. Извлечение признаков по ОРИГИНАЛЬНЫМ именам колонок
     all_features_df = pd.DataFrame(index=df.index)
     
-    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
     if feature_config['describe_col'] != "Не использовать":
-        # Используем переменную, а не жестко заданное имя 'Describe'
         user_selected_describe_col = feature_config['describe_col']
-        # Гарантируем, что работаем со строками
-        describe_series = df[user_selected_describe_col].astype(str).fillna('')
-        extracted = extract_features_from_description(describe_series)
-        all_features_df = pd.concat([all_features_df, extracted], axis=1)
+        if user_selected_describe_col in df.columns:
+            describe_series = df[user_selected_describe_col].astype(str).fillna('')
+            extracted = extract_features_from_description(describe_series)
+            all_features_df = pd.concat([all_features_df, extracted], axis=1)
 
     for feature, source_col in feature_config['manual_features'].items():
         if source_col and source_col in df.columns:
             all_features_df[feature] = df[source_col].astype(str).fillna('не определен')
 
+    # 2. Теперь, когда все данные извлечены, ПЕРЕИМЕНОВЫВАЕМ основные колонки
+    df.rename(columns={v: k for k, v in column_map.items() if v}, inplace=True)
+
+    # 3. Валидация и очистка уже переименованных колонок
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    df.dropna(subset=['date', 'Art', 'Magazin', 'Qty', 'Price'], inplace=True)
+    df['Price'] = pd.to_numeric(df['Price'], errors='coerce').fillna(0)
+    df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
+    
+    # 4. Агрегация данных
     df_with_features = pd.concat([df[['Art', 'Magazin', 'date', 'Qty', 'Price']], all_features_df], axis=1)
+    df_with_features.dropna(subset=['Art', 'Magazin'], inplace=True) 
+
     df_with_features = df_with_features.sort_values(by=['Art', 'Magazin', 'date'])
     first_sale_dates = df_with_features.groupby(['Art', 'Magazin'])['date'].first().reset_index(name='first_sale_date')
     df_merged = pd.merge(df_with_features, first_sale_dates, on=['Art', 'Magazin'])
@@ -110,6 +111,7 @@ def process_data_and_train(_df, column_map, feature_config):
     if len(df_agg) < 50:
         return None, None, None, "Слишком мало данных для обучения после обработки."
 
+    # 5. Обучение модели
     target = 'Qty_30_days'
     cat_features_to_use = ['Magazin'] + feature_cols
     features_to_use = ['Price'] + cat_features_to_use
@@ -144,6 +146,7 @@ def process_data_and_train(_df, column_map, feature_config):
     }
     
     return final_model, features_to_use, metrics, None
+
 # ==============================================================================
 # ОСНОВНОЙ КОД ПРИЛОЖЕНИЯ
 # ==============================================================================
@@ -199,7 +202,6 @@ if 'df_raw' in st.session_state:
     if submitted:
         st.session_state.step = 2
         column_map = {'Magazin': col_magazin, 'Art': col_art, 'date': col_date, 'Qty': col_qty, 'Price': col_price}
-        
         feature_config = {
             'describe_col': col_describe,
             'manual_features': {col: col for col in other_feature_cols}
@@ -214,9 +216,9 @@ if 'df_raw' in st.session_state:
         st.session_state.model = model
         st.session_state.features = features
         st.session_state.metrics = metrics
-        # df_agg не сохраняем, так как он может быть большим и не нужен для предсказаний
         st.session_state.all_stores = df_raw[col_magazin].unique()
         st.session_state.feature_config = feature_config
+        st.rerun()
 
 if st.session_state.step == 2:
     st.header("3. Результаты обучения")
@@ -266,7 +268,6 @@ if st.session_state.step == 2:
             row = new_product_data.copy()
             row['Magazin'] = store
             
-            # Добавляем недостающие колонки со значением по умолчанию, если их нет
             for f in features:
                 if f not in row:
                     row[f] = 'не определен'
