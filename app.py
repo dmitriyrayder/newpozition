@@ -6,207 +6,194 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
 import optuna
 
-# Отключаем детальное логирование Optuna в консоли
-optuna.logging.set_verbosity(optuna.logging.WARNING)
+# --- СТИЛИЗАЦИЯ ИНТЕРФЕЙСА ---
+st.set_page_config(page_title="Модный Советник", layout="wide", initial_sidebar_state="collapsed")
 
-st.set_page_config(page_title="Рекомендатор магазинов", layout="wide")
+st.markdown("""
+<style>
+/* Основной фон приложения */
+.main {
+    background-color: #fce4ec; /* Нежно-розовый */
+}
+/* Заголовок H1 */
+h1 {
+    font-family: 'Comic Sans MS', cursive, sans-serif;
+    color: #e91e63; /* Ярко-розовый */
+    text-align: center;
+    text-shadow: 2px 2px 4px #f8bbd0;
+}
+/* Подзаголовки H2, H3 */
+h2, h3 {
+    font-family: 'Comic Sans MS', cursive, sans-serif;
+    color: #ad1457; /* Глубокий розовый */
+}
+/* Стилизация кнопки */
+.stButton>button {
+    color: white;
+    background-image: linear-gradient(to right, #f06292, #e91e63);
+    border-radius: 25px;
+    border: 2px solid #ad1457;
+    padding: 12px 28px;
+    font-weight: bold;
+    font-size: 18px;
+    box-shadow: 0 4px 15px 0 rgba(233, 30, 99, 0.4);
+    transition: all 0.3s ease 0s;
+}
+.stButton>button:hover {
+    background-position: right center;
+    box-shadow: 0 4px 15px 0 rgba(233, 30, 99, 0.75);
+}
+/* Стилизация контейнера Expander */
+.stExpander {
+    border: 2px solid #f8bbd0;
+    border-radius: 10px;
+    background-color: #fff1f8;
+}
+</style>
+""", unsafe_allow_html=True)
 
-st.title("🎯 Рекомендатор магазинов для нового товара")
+st.title("💖 Модный Советник по Продажам 💖")
 
 # --- БЛОК ВСПОМОГАТЕЛЬНЫХ ФУНКЦИЙ ---
 
 def find_and_convert_date_column(df):
-    """
-    Автоматически находит и конвертирует колонку с датами.
-    Сначала ищет по популярным именам, затем пытается конвертировать object-колонки.
-    """
     potential_date_cols = ['Datasales', 'datasales', 'date', 'Date', 'Дата', 'дата_продажи', 'timestamp']
-    
-    # Поиск по имени
     for col_name in potential_date_cols:
         if col_name in df.columns:
-            st.info(f"Найдена колонка с датой: '{col_name}'. Попытка конвертации...")
+            st.info(f"Найдена колонка с датой: '{col_name}'. Преобразую... ✨")
             try:
-                # errors='coerce' превратит неудачные парсинги в NaT (Not a Time)
                 df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
-                # Если после конвертации почти все значения валидны, считаем это успехом
-                if df[col_name].notna().sum() / len(df) > 0.8:
-                    return df, col_name
-            except Exception:
-                continue # Попробуем следующую
-
-    # Если по имени не нашли, ищем по содержимому
-    st.warning("Не найдено стандартное имя колонки с датой. Пытаюсь найти по содержимому...")
+                if df[col_name].notna().sum() / len(df) > 0.8: return df, col_name
+            except Exception: continue
+    
+    st.warning("Не нашла колонку с датой по имени, ищу по содержимому...")
     for col_name in df.select_dtypes(include=['object']).columns:
         try:
             converted_col = pd.to_datetime(df[col_name], errors='coerce')
-            # Если успешно конвертировано более 80% строк, считаем колонку датой
             if converted_col.notna().sum() / len(df) > 0.8:
-                st.info(f"Автоматически определена колонка с датой: '{col_name}'.")
+                st.success(f"Нашла! ✨ Колонка с датой: '{col_name}'.")
                 df[col_name] = converted_col
                 return df, col_name
-        except Exception:
-            continue
-            
+        except Exception: continue
     return df, None
 
 def display_data_stats(df_raw, df_clean, date_col_name):
-    """Показывает детальную статистику по загруженному датасету."""
-    with st.expander("🔍 Статистика по загруженным данным", expanded=True):
-        initial_rows = len(df_raw)
-        clean_rows = len(df_clean)
-        dropped_rows = initial_rows - clean_rows
-        
+    with st.expander("📊 Смотрим на твои данные...", expanded=True):
         col1, col2, col3 = st.columns(3)
-        col1.metric("Строк в файле", f"{initial_rows}")
-        col2.metric("Строк после очистки", f"{clean_rows}", help="Удалены строки с пропусками в 'Qty', 'Art', 'Magazin' или дате.")
-        col3.metric("Удалено строк", f"{dropped_rows}")
-        
-        st.info(f"""
-        - **Уникальных товаров (Art):** {df_clean['Art'].nunique()}
-        - **Уникальных магазинов (Magazin):** {df_clean['Magazin'].nunique()}
-        - **Период данных:** с {df_clean[date_col_name].min().strftime('%d.%m.%Y')} по {df_clean[date_col_name].max().strftime('%d.%m.%Y')}
+        col1.metric("Строк в файле 💅", f"{len(df_raw)}")
+        col2.metric("Строк для анализа 💎", f"{len(df_clean)}")
+        col3.metric("Удалено лишних 🗑️", f"{len(df_raw) - len(df_clean)}")
+        st.success(f"""
+        - **Уникальных моделей очков:** {df_clean['Art'].nunique()} 🕶️
+        - **Уникальных бутиков:** {df_clean['Magazin'].nunique()} 🏬
+        - **Период продаж:** с {df_clean[date_col_name].min().strftime('%d.%m.%Y')} по {df_clean[date_col_name].max().strftime('%d.%m.%Y')} 🗓️
         """)
 
 @st.cache_data
 def load_and_prepare_data(uploaded_file):
-    """Загружает, проверяет, очищает и агрегирует данные."""
     try:
-        df_raw = pd.read_xlsx(uploaded_file)
+        # --- ИЗМЕНЕНИЕ: Чтение CSV или Excel ---
+        if uploaded_file.name.endswith('.csv'):
+            df_raw = pd.read_csv(uploaded_file)
+        elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+            df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
+        else:
+            st.error("Ой! Я не знаю такой формат файла. Попробуй .csv, .xlsx или .xls 🎀")
+            return None
     except Exception as e:
-        st.error(f"Ошибка чтения файла: {e}")
+        st.error(f"Не могу прочитать файл, дорогая! Ошибка: {e}")
         return None
 
-    # 1. АВТОМАТИЧЕСКИЙ ПОИСК И КОНВЕРТАЦИЯ ДАТЫ
     df, date_col_name = find_and_convert_date_column(df_raw.copy())
     if not date_col_name:
-        st.error("Не удалось найти и обработать колонку с датой в вашем файле. Пожалуйста, проверьте данные.")
+        st.error("Не нашла колонку с датой в файле. Проверь, пожалуйста! 🥺")
         return None
     
-    # 2. ОЧИСТКА ДАННЫХ
     crucial_cols = ['Qty', 'Art', 'Magazin', date_col_name]
     df_clean = df.dropna(subset=crucial_cols).copy()
-    
-    # 3. ОТОБРАЖЕНИЕ СТАТИСТИКИ
     display_data_stats(df_raw, df_clean, date_col_name)
 
-    # 4. АГРЕГАЦИЯ ДАННЫХ (ПРОДАЖИ ЗА ПЕРВЫЕ 30 ДНЕЙ)
-    st.info("Агрегирую продажи за первые 30 дней для каждого товара в каждом магазине...")
+    st.info("Агрегирую продажи за первые 30 дней... Магия в процессе! ✨")
     df_clean = df_clean.sort_values(by=['Art', 'Magazin', date_col_name])
-    first_sale_dates = df_clean.groupby(['Art', 'Magazin'])[date_col_name].first().reset_index()
-    first_sale_dates.rename(columns={date_col_name: 'first_sale_date'}, inplace=True)
-    
+    first_sale_dates = df_clean.groupby(['Art', 'Magazin'])[date_col_name].first().reset_index().rename(columns={date_col_name: 'first_sale_date'})
     df_merged = pd.merge(df_clean, first_sale_dates, on=['Art', 'Magazin'])
     df_30_days = df_merged[df_merged[date_col_name] <= (df_merged['first_sale_date'] + pd.Timedelta(days=30))].copy()
 
     agg_logic = {
-        'Qty': 'sum', 'Sum': 'sum', 'Price': 'mean', 'Model': 'first',
-        'brand': 'first', 'Segment': 'first', 'color': 'first',
-        'formaoprav': 'first', 'Sex': 'first', 'Metal-Plastic': 'first'
+        'Qty': 'sum', 'Sum': 'sum', 'Price': 'mean', 'Model': 'first', 'brand': 'first', 
+        'Segment': 'first', 'color': 'first', 'formaoprav': 'first', 'Sex': 'first', 'Metal-Plastic': 'first'
     }
     df_agg = df_30_days.groupby(['Art', 'Magazin'], as_index=False).agg(agg_logic)
     df_agg.rename(columns={'Qty': 'Qty_30_days'}, inplace=True)
-    
     return df_agg
 
 @st.cache_resource
 def train_model_with_optuna(_df_agg):
-    """Проводит подбор гиперпараметров и обучает финальную модель."""
-    target = 'Qty_30_days'
-    cat_features = ['Magazin', 'brand', 'Segment', 'color', 'formaoprav', 'Sex', 'Metal-Plastic']
-    drop_cols = ['Sum', 'Art', 'Model'] 
-    
-    df_processed = _df_agg.drop(columns=drop_cols, errors='ignore')
+    target, cat_features = 'Qty_30_days', ['Magazin', 'brand', 'Segment', 'color', 'formaoprav', 'Sex', 'Metal-Plastic']
+    df_processed = _df_agg.drop(columns=['Sum', 'Art', 'Model'], errors='ignore')
     features = [col for col in df_processed.columns if col != target]
-    
     for col in cat_features:
-        if col in df_processed.columns:
-            df_processed[col] = df_processed[col].astype(str)
+        if col in df_processed.columns: df_processed[col] = df_processed[col].astype(str)
 
-    X = df_processed[features]
-    y = df_processed[target]
-
+    X, y = df_processed[features], df_processed[target]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
 
-    st.info("Запускаю автоподбор параметров модели с помощью Optuna...")
+    with st.spinner("🔮 Подбираю лучшие волшебные параметры для модели..."):
+        study = optuna.create_study(direction='minimize')
+        study.optimize(lambda trial: mean_absolute_error(y_test, CatBoostRegressor(
+            iterations=1000, learning_rate=trial.suggest_float('learning_rate', 0.01, 0.3),
+            depth=trial.suggest_int('depth', 4, 10), verbose=0, random_seed=42
+        ).fit(X_train, y_train, cat_features=cat_features, eval_set=(X_test, y_test), early_stopping_rounds=50, use_best_model=True).predict(X_test)), n_trials=30)
     
-    def objective(trial):
-        params = {
-            'iterations': 1000,
-            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
-            'depth': trial.suggest_int('depth', 4, 10),
-            'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1e-3, 10.0, log=True),
-            'verbose': 0, 'random_seed': 42
-        }
-        model = CatBoostRegressor(**params)
-        model.fit(X_train, y_train, cat_features=cat_features, eval_set=(X_test, y_test), early_stopping_rounds=50, use_best_model=True)
-        return mean_absolute_error(y_test, model.predict(X_test))
-
-    study = optuna.create_study(direction='minimize')
-    study.optimize(objective, n_trials=30, show_progress_bar=True)
-    
-    best_params = study.best_params
-    st.success(f"Лучшие параметры найдены: {best_params}")
-
-    st.info("Обучаю финальную модель на всех данных...")
-    final_model = CatBoostRegressor(**best_params, iterations=1500, verbose=0, random_seed=42)
-    final_model.fit(X, y, cat_features=cat_features)
-
+    st.success(f"Волшебство сработало! 💫 Лучшие параметры: {study.best_params}")
+    final_model = CatBoostRegressor(**study.best_params, iterations=1500, verbose=0, random_seed=42).fit(X, y, cat_features=cat_features)
     test_preds = final_model.predict(X_test)
-    metrics = {'MAE': mean_absolute_error(y_test, test_preds), 'R2': r2_score(y_test, test_preds)}
-    
-    return final_model, features, cat_features, metrics
+    return final_model, features, {'MAE': mean_absolute_error(y_test, test_preds), 'R2': r2_score(y_test, test_preds)}
 
 # --- ОСНОВНОЙ БЛОК STREAMLIT ---
 
-dataset_file = st.file_uploader("\U0001F4C2 Загрузите xlsx-файл с данными о продажах", type=["xlsx"])
+dataset_file = st.file_uploader("💖 Загрузи свой файл с продажами (.xlsx, .xls, .csv)", type=["csv", "xlsx", "xls"])
 
 if dataset_file:
     df_agg = load_and_prepare_data(dataset_file)
-    
     if df_agg is not None and not df_agg.empty:
-        model, features, cat_features, metrics = train_model_with_optuna(df_agg)
-
+        model, features, metrics = train_model_with_optuna(df_agg)
         if model:
-            st.header("📊 Оценка качества модели")
+            st.header("📊 Оценка моей работы")
             col1, col2 = st.columns(2)
-            col1.metric("Средняя абсолютная ошибка (MAE)", f"{metrics['MAE']:.2f} шт.")
-            col2.metric("Коэффициент детерминации (R²)", f"{metrics['R2']:.2%}")
-            st.caption("MAE показывает, на сколько штук в среднем ошибается прогноз за 30 дней. R² показывает, какую долю изменчивости данных объясняет модель.")
+            col1.metric("Средняя ошибка (MAE)", f"{metrics['MAE']:.2f} шт.", "+/- столько я могу ошибиться")
+            col2.metric("Точность предсказаний (R²)", f"{metrics['R2']:.2%}", "чем ближе к 100%, тем лучше!")
 
-            st.header("✍️ Введите характеристики нового товара")
+            st.header("✍️ Опиши свою новую блестящую модель очков")
             with st.form("product_form"):
                 col1, col2 = st.columns(2)
                 with col1:
-                    brand = st.text_input("Brand (бренд)", help="Например, Ray-Ban")
-                    forma = st.text_input("Forma oprav (форма оправы)", help="Например, Авиатор")
-                    sex = st.selectbox("Sex (пол)", df_agg['Sex'].unique())
-                    price = st.number_input("Price (цена)", min_value=0.0, step=100.0, format="%.2f")
+                    brand = st.text_input("Бренд 👑", help="Например, Miu Miu")
+                    forma = st.text_input("Форма оправы 👓", help="Например, Кошачий глаз")
+                    sex = st.selectbox("Для кого? 👠", df_agg['Sex'].unique())
+                    price = st.number_input("Цена 💰", min_value=0.0, step=100.0, format="%.2f")
                 with col2:
-                    segment = st.selectbox("Segment (сегмент)", df_agg['Segment'].unique())
-                    color = st.text_input("Color (цвет)", help="Например, Черный")
-                    material = st.selectbox("Metal-Plastic (материал)", df_agg['Metal-Plastic'].unique())
-                
-                submitted = st.form_submit_button("🚀 Получить рекомендации")
+                    segment = st.selectbox("Сегмент 💅", df_agg['Segment'].unique())
+                    color = st.text_input("Цвет 🌈", help="Например, Розовый")
+                    material = st.selectbox("Материал ✨", df_agg['Metal-Plastic'].unique())
+                submitted = st.form_submit_button("Найти лучшие бутики! 🚀")
 
             if submitted:
                 magaziny = df_agg['Magazin'].unique()
                 new_product_data = {'brand': brand, 'Segment': segment, 'color': color, 'formaoprav': forma,
                                     'Sex': sex, 'Metal-Plastic': material, 'Price': price}
-                
-                recs_list = [dict(item, Magazin=mag) for mag in magaziny for item in [new_product_data]]
-                recs_df = pd.DataFrame(recs_list)[features]
-
+                recs_df = pd.DataFrame([dict(item, Magazin=mag) for mag in magaziny for item in [new_product_data]])[features]
                 recs_df['Pred_Qty_30_days'] = np.maximum(0, model.predict(recs_df).round(0))
-                
                 max_pred = recs_df['Pred_Qty_30_days'].max()
                 recs_df['Rating_%'] = (recs_df['Pred_Qty_30_days'] / max_pred * 100).round(0) if max_pred > 0 else 0
                 
-                top_magaziny = recs_df.sort_values(by='Pred_Qty_30_days', ascending=False).reset_index(drop=True)
+                top_magaziny = recs_df.sort_values(by='Pred_Qty_30_days', ascending=False).rename(columns={
+                    'Magazin': 'Бутик', 'Pred_Qty_30_days': 'Прогноз продаж (30 дней, шт.)', 'Rating_%': 'Рейтинг успеха (%)'
+                })
 
-                st.subheader("\U0001F4C8 Рекомендованные магазины для нового товара")
-                st.table(top_magaziny[['Magazin', 'Pred_Qty_30_days', 'Rating_%']].rename(columns={
-                    'Magazin': 'Магазин', 'Pred_Qty_30_days': 'Прогноз продаж (30 дней, шт.)', 'Rating_%': 'Рейтинг (%)'
-                }))
+                st.subheader("🎉 Вот лучшие места для твоей новинки! 🎉")
+                st.dataframe(top_magaziny[['Бутик', 'Прогноз продаж (30 дней, шт.)', 'Рейтинг успеха (%)']].style.highlight_max(
+                    subset=['Прогноз продаж (30 дней, шт.)'], color='#f8bbd0', axis=0
+                ).format({'Прогноз продаж (30 дней, шт.)': '{:.0f}', 'Рейтинг успеха (%)': '{:.0f}%'}), use_container_width=True)
 else:
-    st.info("Пожалуйста, загрузите CSV-файл с данными о продажах для начала работы.")
+    st.info("💋 Привет! Загрузи файлик, и я помогу тебе стать звездой продаж!")
