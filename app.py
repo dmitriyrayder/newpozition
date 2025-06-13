@@ -29,98 +29,78 @@ st.title("💖 Модный Советник по Продажам 💖")
 
 # --- БЛОК ВСПОМОГАТЕЛЬНЫХ ФУНКЦИЙ ---
 
-def suggest_date_column(df):
-    """Предполагает, какая колонка является датой, но не преобразует ее."""
-    potential_date_cols = [
-        'Datasales', 'datasales', 'date', 'Date', 'data', 'Дата', 'дата_продажи', 'timestamp'
-    ]
-    for col_name in potential_date_cols:
-        if col_name in df.columns:
-            return col_name
-    # Если по имени не нашли, ищем по содержимому (но менее агрессивно)
-    for col_name in df.select_dtypes(include=['object']).columns:
-        try:
-            # Проверяем, можно ли преобразовать хотя бы часть строк
-            if pd.to_datetime(df[col_name], errors='coerce', infer_datetime_format=True).notna().sum() > 0:
-                 # Проверяем, что в названии есть намек на дату
-                if any(substr in col_name.lower() for substr in ['date', 'дата', 'day', 'день']):
-                    return col_name
-        except Exception:
-            continue
-    return None
-
-def display_data_stats(total_rows, clean_rows, bad_date_rows, df_agg, date_col_name):
-    with st.expander("📊 Смотрим на твои данные...", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Строк в файле 💅", f"{total_rows}")
-        col2.metric("Строк для анализа 💎", f"{clean_rows}", help="Строки с заполненными 'Qty', 'Art', 'Magazin' и корректной датой.")
-        col3.metric("Удалено из-за ошибок 🗑️", f"{(total_rows - clean_rows)}", help=f"Включая {bad_date_rows} строк с некорректным форматом даты в колонке '{date_col_name}'.")
-        st.success(f"""
-        - **Уникальных моделей очков:** {df_agg['Art'].nunique()} 🕶️
-        - **Уникальных бутиков:** {df_agg['Magazin'].nunique()} 🏬
-        - **Период продаж:** с {df_agg['first_sale_date'].min().strftime('%d.%m.%Y')} по {df_agg['first_sale_date'].max().strftime('%d.%m.%Y')} 🗓️
-        """)
-
 @st.cache_data
-def process_and_aggregate(df, date_col_name):
+def process_and_aggregate(_df, column_map):
     """Основная функция обработки данных, кэшируется."""
+    df = _df.copy()
+    
+    # Переименовываем колонки в стандартные имена для удобства
+    internal_map = {v: k for k, v in column_map.items()}
+    df.rename(columns=internal_map, inplace=True)
+    
     initial_rows = len(df)
     
-    # 1. Принудительное преобразование даты и удаление ошибок
-    df[date_col_name] = pd.to_datetime(df[date_col_name], errors='coerce')
-    rows_before_date_drop = len(df)
-    df.dropna(subset=[date_col_name], inplace=True)
-    rows_after_date_drop = len(df)
-    bad_date_rows = rows_before_date_drop - rows_after_date_drop
+    # 1. Обработка дат
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
+    bad_date_rows = df['date'].isna().sum()
+    df.dropna(subset=['date'], inplace=True)
 
     # 2. Удаление пропусков в ключевых колонках
-    crucial_cols = ['Qty', 'Art', 'Magazin']
-    df_clean = df.dropna(subset=crucial_cols).copy()
+    crucial_cols = ['Qty', 'Art', 'Magazin', 'Price']
+    df.dropna(subset=crucial_cols, inplace=True)
     
     # 3. Агрегация
-    df_clean = df_clean.sort_values(by=['Art', 'Magazin', date_col_name])
-    series_of_first_dates = df_clean.groupby(['Art', 'Magazin'])[date_col_name].first()
+    df = df.sort_values(by=['Art', 'Magazin', 'date'])
+    series_of_first_dates = df.groupby(['Art', 'Magazin'])['date'].first()
     first_sale_dates = series_of_first_dates.reset_index(name='first_sale_date')
-    df_merged = pd.merge(df_clean, first_sale_dates, on=['Art', 'Magazin'])
-    df_30_days = df_merged[df_merged[date_col_name] <= (df_merged['first_sale_date'] + pd.Timedelta(days=30))].copy()
-    agg_logic = {
-        'Qty': 'sum', 'Sum': 'sum', 'Price': 'mean', 'Model': 'first', 'brand': 'first',
-        'Segment': 'first', 'color': 'first', 'formaoprav': 'first', 'Sex': 'first', 'Metal-Plastic': 'first',
-        'first_sale_date': 'first' # Добавляем для статистики
-    }
+    df_merged = pd.merge(df, first_sale_dates, on=['Art', 'Magazin'])
+    df_30_days = df_merged[df_merged['date'] <= (df_merged['first_sale_date'] + pd.Timedelta(days=30))].copy()
+
+    agg_logic = {'Qty': 'sum', 'Price': 'mean'}
+    # Динамически добавляем агрегацию для категориальных признаков
+    for cat_col in column_map['categorical_features']:
+        agg_logic[cat_col] = 'first'
+    
     df_agg = df_30_days.groupby(['Art', 'Magazin'], as_index=False).agg(agg_logic)
     df_agg.rename(columns={'Qty': 'Qty_30_days'}, inplace=True)
-
+    
     stats = {
         "total_rows": initial_rows, 
-        "clean_rows": len(df_agg), 
+        "final_rows": len(df_agg), 
         "bad_date_rows": bad_date_rows
     }
     return df_agg, stats
 
 @st.cache_resource
-def train_model_with_optuna(_df_agg):
-    # (Эта функция без изменений)
-    target, cat_features = 'Qty_30_days', ['Magazin', 'brand', 'Segment', 'color', 'formaoprav', 'Sex', 'Metal-Plastic']
-    df_processed = _df_agg.drop(columns=['Sum', 'Art', 'Model', 'first_sale_date'], errors='ignore')
-    features = [col for col in df_processed.columns if col != target]
-    for col in cat_features:
-        if col in df_processed.columns: df_processed[col] = df_processed[col].astype(str)
+def train_model_with_optuna(_df_agg, cat_features):
+    target = 'Qty_30_days'
+    # 'Art' никогда не используется как признак
+    features = ['Magazin', 'Price'] + cat_features
+    df_processed = _df_agg[features + [target]]
+    
+    for col in cat_features + ['Magazin']:
+        df_processed[col] = df_processed[col].astype(str)
+
     X, y = df_processed[features], df_processed[target]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+
     with st.spinner("🔮 Подбираю лучшие волшебные параметры для модели..."):
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(direction='minimize')
         study.optimize(lambda trial: mean_absolute_error(y_test, CatBoostRegressor(
             iterations=1000, learning_rate=trial.suggest_float('learning_rate', 0.01, 0.3),
             depth=trial.suggest_int('depth', 4, 10), verbose=0, random_seed=42
-        ).fit(X_train, y_train, cat_features=cat_features, eval_set=(X_test, y_test), early_stopping_rounds=50, use_best_model=True).predict(X_test)), n_trials=30)
+        ).fit(X_train, y_train, cat_features=cat_features + ['Magazin'], eval_set=(X_test, y_test), early_stopping_rounds=50, use_best_model=True).predict(X_test)), n_trials=30)
+    
     st.success(f"Волшебство сработало! 💫 Лучшие параметры: {study.best_params}")
-    final_model = CatBoostRegressor(**study.best_params, iterations=1500, verbose=0, random_seed=42).fit(X, y, cat_features=cat_features)
+    final_model = CatBoostRegressor(**study.best_params, iterations=1500, verbose=0, random_seed=42).fit(X, y, cat_features=cat_features + ['Magazin'])
     test_preds = final_model.predict(X_test)
     return final_model, features, {'MAE': mean_absolute_error(y_test, test_preds), 'R2': r2_score(y_test, test_preds)}
 
 # --- ОСНОВНОЙ БЛОК STREAMLIT ---
+
+if 'processed' not in st.session_state:
+    st.session_state.processed = False
 
 dataset_file = st.file_uploader("💖 Загрузи свой файл с продажами (.xlsx, .xls, .csv)", type=["csv", "xlsx", "xls"])
 
@@ -130,70 +110,105 @@ if dataset_file:
             df_raw = pd.read_csv(dataset_file)
         else:
             df_raw = pd.read_excel(dataset_file, engine='openpyxl')
+        st.session_state.df_raw = df_raw
     except Exception as e:
         st.error(f"Не могу прочитать файл, дорогая! Ошибка: {e}")
         st.stop()
     
-    # --- НОВЫЙ БЛОК: РУЧНОЙ ВЫБОР КОЛОНКИ С ДАТОЙ ---
-    st.subheader("Шаг 1: Проверка данных 🧐")
-    suggested_col = suggest_date_column(df_raw)
-    all_columns = df_raw.columns.tolist()
+    st.subheader("Шаг 1: Помоги мне понять твои данные 🧐")
+    st.info("Пожалуйста, укажи, какие колонки в твоем файле за что отвечают. Это очень важно! 🙏")
     
-    if suggested_col and suggested_col in all_columns:
-        default_index = all_columns.index(suggested_col)
-    else:
-        default_index = 0
+    all_columns = st.session_state.df_raw.columns.tolist()
+    
+    with st.form("mapping_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            art_col = st.selectbox("Артикул товара (ID)", all_columns, index=0)
+            magazin_col = st.selectbox("Название магазина", all_columns, index=1)
+            date_col = st.selectbox("Дата продажи", all_columns, index=2)
+        with col2:
+            qty_col = st.selectbox("Количество проданного товара (шт.)", all_columns, index=3)
+            price_col = st.selectbox("Цена товара", all_columns, index=4)
         
-    date_col_name = st.selectbox(
-        "🎀 Я думаю, колонка с датой это...",
-        options=all_columns,
-        index=default_index,
-        help="Пожалуйста, выбери колонку, где указана дата продажи. Я постаралась угадать сама!"
-    )
-    
-    df_agg, stats = process_and_aggregate(df_raw, date_col_name)
-    display_data_stats(stats['total_rows'], stats['clean_rows'], stats['bad_date_rows'], df_agg, date_col_name)
+        available_features = [c for c in all_columns if c not in [art_col, magazin_col, date_col, qty_col, price_col]]
+        cat_features_selected = st.multiselect(
+            "Описательные характеристики товара (выбери все, что описывает товар)",
+            available_features,
+            help="Выбери колонки вроде 'Бренд', 'Цвет', 'Материал', 'Сегмент' и т.д."
+        )
+        
+        submitted_mapping = st.form_submit_button("Обработать данные и обучить модель 🚀")
 
-    if df_agg is not None and not df_agg.empty:
-        st.subheader("Шаг 2: Создание прогноза 🧙‍♀️")
-        model, features, metrics = train_model_with_optuna(df_agg)
-        if model:
-            # (Остальная часть кода без изменений)
-            st.header("📊 Оценка моей работы")
-            col1, col2 = st.columns(2)
-            col1.metric("Средняя ошибка (MAE)", f"{metrics['MAE']:.2f} шт.", "+/- столько я могу ошибиться")
-            col2.metric("Точность предсказаний (R²)", f"{metrics['R2']:.2%}", "чем ближе к 100%, тем лучше!")
+    if submitted_mapping:
+        column_map = {
+            'Art': art_col, 'Magazin': magazin_col, 'date': date_col,
+            'Qty': qty_col, 'Price': price_col,
+            'categorical_features': cat_features_selected
+        }
+        st.session_state.column_map = column_map
+        
+        df_agg, stats = process_and_aggregate(st.session_state.df_raw, column_map)
+        
+        with st.expander("📊 Смотрим на твои данные...", expanded=True):
+            st.metric("Строк в файле 💅", f"{stats['total_rows']}")
+            st.metric("Строк после очистки и агрегации 💎", f"{stats['final_rows']}")
+            st.metric("Строк с плохой датой 🗑️", f"{stats['bad_date_rows']}")
+        
+        st.session_state.df_agg = df_agg
+        
+        model, features, metrics = train_model_with_optuna(df_agg, cat_features_selected)
+        st.session_state.model = model
+        st.session_state.features = features
+        st.session_state.metrics = metrics
+        st.session_state.processed = True
+        st.rerun()
 
-            st.header("✍️ Опиши свою новую блестящую модель очков")
-            with st.form("product_form"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    brand = st.text_input("Бренд 👑", help="Например, Miu Miu")
-                    forma = st.text_input("Форма оправы 👓", help="Например, Кошачий глаз")
-                    sex = st.selectbox("Для кого? 👠", df_agg['Sex'].unique())
-                    price = st.number_input("Цена 💰", min_value=0.0, step=100.0, format="%.2f")
-                with col2:
-                    segment = st.selectbox("Сегмент 💅", df_agg['Segment'].unique())
-                    color = st.text_input("Цвет 🌈", help="Например, Розовый")
-                    material = st.selectbox("Материал ✨", df_agg['Metal-Plastic'].unique())
-                submitted = st.form_submit_button("Найти лучшие бутики! 🚀")
+if st.session_state.processed:
+    st.subheader("Шаг 2: Создание прогноза 🧙‍♀️")
+    st.header("📊 Оценка моей работы")
+    metrics = st.session_state.metrics
+    col1, col2 = st.columns(2)
+    col1.metric("Средняя ошибка (MAE)", f"{metrics['MAE']:.2f} шт.", "+/- столько я могу ошибиться")
+    col2.metric("Точность предсказаний (R²)", f"{metrics['R2']:.2%}", "чем ближе к 100%, тем лучше!")
 
-            if submitted:
-                magaziny = df_agg['Magazin'].unique()
-                new_product_data = {'brand': brand, 'Segment': segment, 'color': color, 'formaoprav': forma,
-                                    'Sex': sex, 'Metal-Plastic': material, 'Price': price}
-                recs_df = pd.DataFrame([dict(item, Magazin=mag) for mag in magaziny for item in [new_product_data]])[features]
-                recs_df['Pred_Qty_30_days'] = np.maximum(0, model.predict(recs_df).round(0))
-                max_pred = recs_df['Pred_Qty_30_days'].max()
-                recs_df['Rating_%'] = (recs_df['Pred_Qty_30_days'] / max_pred * 100).round(0) if max_pred > 0 else 0
-                
-                top_magaziny = recs_df.sort_values(by='Pred_Qty_30_days', ascending=False).rename(columns={
-                    'Magazin': 'Бутик', 'Pred_Qty_30_days': 'Прогноз продаж (30 дней, шт.)', 'Rating_%': 'Рейтинг успеха (%)'
-                })
+    st.header("✍️ Опиши свою новую блестящую модель очков")
+    with st.form("product_form"):
+        new_product_data = {}
+        # Динамически создаем поля для ввода
+        for feature in st.session_state.column_map['categorical_features']:
+            unique_vals = st.session_state.df_agg[feature].dropna().unique().tolist()
+            new_product_data[feature] = st.selectbox(f"{feature} ✨", unique_vals)
+        
+        new_product_data['Price'] = st.number_input("Цена 💰", min_value=0.0, step=100.0, format="%.2f")
+        
+        submitted_prediction = st.form_submit_button("Найти лучшие бутики! 🚀")
 
-                st.subheader("🎉 Вот лучшие места для твоей новинки! 🎉")
-                st.dataframe(top_magaziny[['Бутик', 'Прогноз продаж (30 дней, шт.)', 'Рейтинг успеха (%)']].style.highlight_max(
-                    subset=['Прогноз продаж (30 дней, шт.)'], color='#f8bbd0', axis=0
-                ).format({'Прогноз продаж (30 дней, шт.)': '{:.0f}', 'Рейтинг успеха (%)': '{:.0f}%'}), use_container_width=True)
+    if submitted_prediction:
+        df_agg = st.session_state.df_agg
+        model = st.session_state.model
+        features = st.session_state.features
+        
+        magaziny = df_agg['Magazin'].unique()
+        
+        recs_list = []
+        for magazin in magaziny:
+            row = new_product_data.copy()
+            row['Magazin'] = magazin
+            recs_list.append(row)
+
+        recs_df = pd.DataFrame(recs_list)[features]
+        recs_df['Pred_Qty_30_days'] = np.maximum(0, model.predict(recs_df).round(0))
+        max_pred = recs_df['Pred_Qty_30_days'].max()
+        recs_df['Rating_%'] = (recs_df['Pred_Qty_30_days'] / max_pred * 100).round(0) if max_pred > 0 else 0
+        
+        top_magaziny = recs_df.sort_values(by='Pred_Qty_30_days', ascending=False).rename(columns={
+            'Magazin': 'Бутик', 'Pred_Qty_30_days': 'Прогноз продаж (30 дней, шт.)', 'Rating_%': 'Рейтинг успеха (%)'
+        })
+
+        st.subheader("🎉 Вот лучшие места для твоей новинки! 🎉")
+        st.dataframe(top_magaziny[['Бутик', 'Прогноз продаж (30 дней, шт.)', 'Рейтинг успеха (%)']].style.highlight_max(
+            subset=['Прогноз продаж (30 дней, шт.)'], color='#f8bbd0', axis=0
+        ).format({'Прогноз продаж (30 дней, шт.)': '{:.0f}', 'Рейтинг успеха (%)': '{:.0f}%'}), use_container_width=True)
 else:
-    st.info("💋 Привет! Загрузи файлик, и я помогу тебе стать звездой продаж!")
+    if not dataset_file:
+        st.info("💋 Привет! Загрузи файлик, а потом помоги мне понять, где какие данные.")
