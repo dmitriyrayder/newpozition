@@ -47,7 +47,6 @@ def auto_detect_column(columns, keywords, default_index=0):
         for i, col in enumerate(columns):
             if keyword.lower() in str(col).lower():
                 return i
-    # ИСПРАВЛЕНИЕ: Безопасный возврат индекса, если default_index слишком большой
     return min(default_index, len(columns) - 1) if columns else 0
 
 def extract_features_from_description(descriptions_series):
@@ -83,12 +82,10 @@ def process_data_and_train(_df, column_map, feature_config):
     try:
         df = _df.copy()
         
-        # --- ПРОВЕРКА ВХОДНЫХ ДАННЫХ ---
         missing_columns = [f"`{v}` (для `{k}`)" for k, v in column_map.items() if v and v not in df.columns]
         if missing_columns:
-            return None, None, None, f"Отсутствуют колонки в данных: {', '.join(missing_columns)}"
+            return None, None, None, None, f"Отсутствуют колонки в данных: {', '.join(missing_columns)}"
 
-        # --- 1. ИЗВЛЕЧЕНИЕ ПРИЗНАКОВ ПО ОРИГИНАЛЬНЫМ ИМЕНАМ ---
         all_features_df = pd.DataFrame(index=df.index)
         
         if feature_config['describe_col'] != "Не использовать":
@@ -105,22 +102,20 @@ def process_data_and_train(_df, column_map, feature_config):
             if source_col and source_col in df.columns and not df[source_col].empty:
                 all_features_df[feature] = df[source_col].fillna('не определен').astype(str)
 
-        # --- 2. ПЕРЕИМЕНОВАНИЕ ОСНОВНЫХ КОЛОНОК ---
         df.rename(columns={v: k for k, v in column_map.items() if v}, inplace=True)
         required_cols = ['date', 'Art', 'Magazin', 'Qty', 'Price']
         if any(col not in df.columns for col in required_cols):
-            return None, None, None, f"Отсутствуют обязательные колонки после переименования: `date`, `Art`, `Magazin`, `Qty`, `Price`"
+            return None, None, None, None, f"Отсутствуют обязательные колонки после переименования: `date`, `Art`, `Magazin`, `Qty`, `Price`"
 
-        # --- 3. ВАЛИДАЦИЯ И ОЧИСТКА ---
         initial_len = len(df)
         df.dropna(subset=required_cols, inplace=True)
         if len(df) == 0:
-            return None, None, None, "Все строки были удалены, так как в них отсутствовали значения в обязательных полях."
+            return None, None, None, None, "Все строки были удалены, так как в них отсутствовали значения в обязательных полях."
 
         df['date'] = pd.to_datetime(df['date'], errors='coerce')
         df.dropna(subset=['date'], inplace=True)
         if len(df) == 0:
-            return None, None, None, "Все строки удалены из-за некорректного формата даты."
+            return None, None, None, None, "Все строки удалены из-за некорректного формата даты."
 
         df['Price'] = pd.to_numeric(df['Price'], errors='coerce').fillna(0)
         df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
@@ -128,14 +123,13 @@ def process_data_and_train(_df, column_map, feature_config):
         final_len = len(df)
 
         if final_len == 0:
-            return None, None, None, "Не найдено строк с положительными значениями цены и количества."
+            return None, None, None, None, "Не найдено строк с положительными значениями цены и количества."
         
         data_loss_percent = (initial_len - final_len) / initial_len * 100
         st.info(f"📊 **Статистика очистки:** Исходных строк: {initial_len:,}. Строк для обучения: {final_len:,}. Удалено: {data_loss_percent:.1f}%")
         if data_loss_percent > 50:
             st.warning("⚠️ Удалено более 50% данных. Проверьте качество исходного файла.")
 
-        # --- 4. АГРЕГАЦИЯ ДАННЫХ ---
         if not all_features_df.empty:
             df = pd.concat([df, all_features_df.reindex(df.index)], axis=1)
         
@@ -153,9 +147,8 @@ def process_data_and_train(_df, column_map, feature_config):
         df_agg.rename(columns={'Qty': 'Qty_30_days'}, inplace=True)
 
         if len(df_agg) < 10:
-            return None, None, None, f"Слишком мало агрегированных данных для обучения: {len(df_agg)} записей. Нужно минимум 10."
+            return None, None, None, None, f"Слишком мало агрегированных данных для обучения: {len(df_agg)} записей. Нужно минимум 10."
 
-        # --- 5. ОБУЧЕНИЕ МОДЕЛИ ---
         target = 'Qty_30_days'
         cat_features_to_use = ['Magazin'] + feature_cols
         features_to_use = ['Price'] + cat_features_to_use
@@ -166,9 +159,9 @@ def process_data_and_train(_df, column_map, feature_config):
             X[col] = X[col].fillna('не определен').astype('category')
 
         if len(X) < 5:
-            return None, None, None, f"Слишком мало данных для разделения на выборки: {len(X)}."
+            return None, None, None, None, f"Слишком мало данных для разделения на выборки: {len(X)}."
 
-        test_size = min(0.2, max(0.1, 5.0 / len(X))) # Адаптивный размер
+        test_size = min(0.2, max(0.1, 5.0 / len(X)))
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42)
         
         def objective(trial):
@@ -191,7 +184,6 @@ def process_data_and_train(_df, column_map, feature_config):
         y_pred = final_model.predict(X_test)
         metrics = {'MAE': mean_absolute_error(y_test, y_pred), 'R2': max(0, r2_score(y_test, y_pred))}
         
-        # ДОБАВЛЕНО: Сохраняем уникальные значения для предсказаний
         unique_values_for_prediction = {col: X[col].unique().tolist() for col in cat_features_to_use}
 
         return final_model, features_to_use, metrics, unique_values_for_prediction, None
@@ -215,7 +207,6 @@ with st.sidebar:
 
     if uploaded_file:
         try:
-            # ИСПРАВЛЕНИЕ: Более безопасное чтение файлов
             if uploaded_file.name.endswith('.csv'):
                 try:
                     df = pd.read_csv(uploaded_file, encoding='utf-8')
@@ -229,9 +220,14 @@ with st.sidebar:
                 st.error("Загруженный файл пустой!")
                 st.stop()
             
-            df.columns = df.columns.astype(str).str.strip()
+            # ===== ИСПРАВЛЕНИЕ ЗДЕСЬ =====
+            # Старый код: df.columns = df.columns.astype(str).str.strip()
+            # Новый, надежный код:
+            df.columns = [str(col).strip() for col in df.columns]
+            # ==============================
+
             st.session_state.df_raw = df
-            st.session_state.step = 1 # Сброс при загрузке нового файла
+            st.session_state.step = 1
             
             st.success(f"📊 Файл '{uploaded_file.name}' успешно загружен!")
             col1, col2 = st.columns(2)
@@ -271,7 +267,7 @@ if 'df_raw' in st.session_state:
         st.subheader("✨ Дополнительные признаки товара")
         other_feature_cols = st.multiselect(
             "Выберите колонки с характеристиками (Бренд, Цвет, Пол и т.д.):",
-            [c for c in df_raw.columns if c not in [col_magazin, col_art, col_qty, col_date, col_price, col_describe]]
+            [c for c in df_raw.columns if c not in [col_magazin, col_art, col_qty, col_date, col_price, col_describe] and c != ""]
         )
         
         submitted = st.form_submit_button("✅ Подтвердить и обучить модель", type="primary", use_container_width=True)
@@ -316,7 +312,6 @@ if st.session_state.step == 2:
     except Exception as e:
         st.warning(f"Не удалось отобразить важность признаков: {e}")
 
-    # ДОБАВЛЕНО: Блок для прогнозирования
     st.header("4. Сделать прогноз")
     st.info("Введите данные нового товара, чтобы спрогнозировать его продажи за первые 30 дней.")
     
@@ -326,7 +321,6 @@ if st.session_state.step == 2:
         prediction_data = {}
         cols = st.columns(2)
         
-        # Динамическое создание полей ввода
         col_idx = 0
         for feature in st.session_state.features:
             current_col = cols[col_idx % 2]
@@ -334,7 +328,6 @@ if st.session_state.step == 2:
                 if feature == 'Price':
                     prediction_data[feature] = st.number_input("Цена товара", min_value=0.0, step=100.0, value=1000.0)
                 elif feature in unique_vals:
-                    # Используем сохраненные уникальные значения для селектбоксов
                     options = sorted(unique_vals[feature])
                     prediction_data[feature] = st.selectbox(f"Признак: {feature}", options=options, index=0)
 
@@ -343,7 +336,6 @@ if st.session_state.step == 2:
     if predict_button:
         try:
             input_df = pd.DataFrame([prediction_data])
-            # Приводим типы данных в соответствие с обученной моделью
             for col in input_df.columns:
                 if col in st.session_state.model.get_cat_feature_indices():
                     input_df[col] = input_df[col].astype('category')
