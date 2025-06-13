@@ -1,504 +1,386 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+from catboost import CatBoostRegressor
 import re
-from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
-from catboost import CatBoostRegressor
+from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-def load_custom_css():
-    """Загрузка кастомных стилей"""
-    st.markdown("""
-    <style>
-    .main > div {
-        padding-top: 2rem;
-    }
-    .stApp {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    }
-    .block-container {
-        background: rgba(255, 255, 255, 0.95);
-        border-radius: 15px;
-        padding: 2rem;
-        margin: 1rem;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 50%, #fecfef 100%);
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 0.5rem 0;
-        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-    }
-    .upload-section {
-        background: linear-gradient(135deg, #a8edea 0%, #fed6e3 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        text-align: center;
-        margin: 1rem 0;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# Конфигурация страницы
+st.set_page_config(page_title="💖 Модный Советник", layout="wide", initial_sidebar_state="expanded")
 
-# Настройка страницы
-st.set_page_config(
-    page_title="👓 Прогноз продаж очков",
-    page_icon="👓",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Кастомный CSS для красных кнопок
+st.markdown("""
+<style>
+.stButton > button {
+    background-color: #DC143C;
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-weight: bold;
+    font-size: 16px;
+    padding: 0.5rem 1rem;
+    transition: all 0.3s;
+}
+.stButton > button:hover {
+    background-color: #B22222;
+    transform: translateY(-2px);
+}
+</style>
+""", unsafe_allow_html=True)
 
-# Загрузка стилей
-load_custom_css()
+@st.cache_data
+def auto_detect_column(columns, keywords):
+    """Автоопределение колонок по ключевым словам"""
+    for keyword in keywords:
+        for i, col in enumerate(columns):
+            if keyword.lower() in col.lower():
+                return i
+    return 0
 
-class GlassesSalesPredictor:
-    def __init__(self):
-        self.model = None
-        self.feature_columns = []
-        self.categorical_features = []
+@st.cache_data
+def safe_read_file(uploaded_file):
+    """Безопасное чтение файла с обработкой дат"""
+    try:
+        if uploaded_file.name.endswith('.xlsx'):
+            df = pd.read_excel(uploaded_file)
+        else:
+            df = pd.read_csv(uploaded_file)
         
-    def extract_features_from_description(self, description):
-        """Извлечение признаков из описания товара"""
-        if pd.isna(description):
-            description = ""
+        # Попытка автоопределения даты
+        date_cols = [col for col in df.columns if any(word in col.lower() for word in ['date', 'дата', 'datasales'])]
+        for col in date_cols:
+            try:
+                df[col] = pd.to_datetime(df[col])
+            except:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
         
-        desc_lower = description.lower()
+        return df, len(df), 0
+    except Exception as e:
+        st.error(f"Ошибка чтения файла: {e}")
+        return None, 0, 1
+
+@st.cache_data
+def extract_features_from_text(text_series):
+    """Извлечение признаков из текстового описания"""
+    features = pd.DataFrame(index=text_series.index)
+    
+    # Пол
+    gender_patterns = {
+        'Мужские': r'мужск|male|men',
+        'Женские': r'женск|female|women|lady',
+        'Унисекс': r'унисекс|unisex'
+    }
+    features['gender'] = 'Унисекс'
+    for gender, pattern in gender_patterns.items():
+        mask = text_series.str.contains(pattern, case=False, na=False)
+        features.loc[mask, 'gender'] = gender
+    
+    # Материал
+    material_patterns = {
+        'Металл': r'металл|metal|steel|титан',
+        'Пластик': r'пластик|plastic|acetate',
+        'Дерево': r'дерев|wood|bamboo'
+    }
+    features['material'] = 'Пластик'
+    for material, pattern in material_patterns.items():
+        mask = text_series.str.contains(pattern, case=False, na=False)
+        features.loc[mask, 'material'] = material
+    
+    # Форма
+    shape_patterns = {
+        'Авиатор': r'авиатор|aviator|pilot',
+        'Вайфарер': r'вайфарер|wayfarer',
+        'Круглые': r'кругл|round|circle',
+        'Прямоугольные': r'прямоуг|rectangle|square',
+        'Кошачий глаз': r'кошач|cat.eye'
+    }
+    features['shape'] = 'Прямоугольные'
+    for shape, pattern in shape_patterns.items():
+        mask = text_series.str.contains(pattern, case=False, na=False)
+        features.loc[mask, 'shape'] = shape
+    
+    # Бинарные признаки
+    features['is_polarized'] = text_series.str.contains(r'поляр|polar', case=False, na=False).astype(int)
+    features['has_uv'] = text_series.str.contains(r'uv|защита|protection', case=False, na=False).astype(int)
+    
+    return features
+
+@st.cache_data
+def create_store_profiles(df, store_col, price_col, date_col, qty_col):
+    """Создание профилей магазинов"""
+    profiles = {}
+    
+    for store in df[store_col].unique():
+        store_data = df[df[store_col] == store]
         
-        # Материал оправы
-        frame_material = 'Другое'
-        if any(word in desc_lower for word in ['металл', 'метал', 'steel', 'titanium']):
-            frame_material = 'Металл'
-        elif any(word in desc_lower for word in ['пластик', 'plastic', 'acetate']):
-            frame_material = 'Пластик'
-        elif any(word in desc_lower for word in ['дерев', 'wood', 'bamboo']):
-            frame_material = 'Дерево'
-            
-        # Форма оправы
-        frame_shape = 'Другое'
-        if any(word in desc_lower for word in ['авиатор', 'aviator', 'пилот']):
-            frame_shape = 'Авиатор'
-        elif any(word in desc_lower for word in ['вайфарер', 'wayfarer']):
-            frame_shape = 'Вайфарер'
-        elif any(word in desc_lower for word in ['кошач', 'cat eye']):
-            frame_shape = 'Кошачий глаз'
-        elif any(word in desc_lower for word in ['круг', 'round']):
-            frame_shape = 'Круглые'
-        elif any(word in desc_lower for word in ['прямоуг', 'rectangle', 'квадрат']):
-            frame_shape = 'Прямоугольные'
-        elif any(word in desc_lower for word in ['спорт', 'sport']):
-            frame_shape = 'Спортивные'
-            
-        # Цвет линз
-        lens_color = 'Другое'
-        if any(word in desc_lower for word in ['черн', 'black']):
-            lens_color = 'Черный'
-        elif any(word in desc_lower for word in ['коричн', 'brown']):
-            lens_color = 'Коричневый'
-        elif any(word in desc_lower for word in ['зеркал', 'mirror', 'серебр']):
-            lens_color = 'Зеркальный'
-        elif any(word in desc_lower for word in ['градиент', 'gradient']):
-            lens_color = 'Градиентный'
-        elif any(word in desc_lower for word in ['син', 'blue']):
-            lens_color = 'Синий'
-        elif any(word in desc_lower for word in ['зелен', 'green']):
-            lens_color = 'Зеленый'
-            
-        # Пол
-        gender = 'Унисекс'
-        if any(word in desc_lower for word in ['мужск', 'men', 'male']):
-            gender = 'Мужские'
-        elif any(word in desc_lower for word in ['женск', 'women', 'female']):
-            gender = 'Женские'
-            
-        # Поляризация и UV защита
-        is_polarized = 1 if any(word in desc_lower for word in ['поляр', 'polar']) else 0
-        has_uv_protection = 1 if any(word in desc_lower for word in ['uv', 'ультрафиолет']) else 0
-        
-        return {
-            'frame_material': frame_material,
-            'frame_shape': frame_shape,
-            'lens_color': lens_color,
-            'gender': gender,
-            'is_polarized': is_polarized,
-            'has_uv_protection': has_uv_protection
+        profiles[store] = {
+            'avg_price': store_data[price_col].mean(),
+            'price_std': store_data[price_col].std(),
+            'total_sales': store_data[qty_col].sum(),
+            'unique_products': store_data.iloc[:, 0].nunique(),  # Предполагаем первая колонка - артикул
+            'avg_monthly_sales': store_data.groupby(store_data[date_col].dt.to_period('M'))[qty_col].sum().mean()
         }
     
-    def create_price_segment(self, price):
-        """Создание ценового сегмента"""
-        if price < 2000:
-            return 'Эконом'
-        elif price < 5000:
-            return 'Средний'
+    return profiles
+
+def prepare_training_data(df, columns_mapping, store_profiles):
+    """Подготовка данных для обучения"""
+    # Создание признаков товара
+    if columns_mapping.get('describe'):
+        product_features = extract_features_from_text(df[columns_mapping['describe']])
+    else:
+        # Если нет описания, создаем базовые признаки
+        product_features = pd.DataFrame({
+            'gender': 'Унисекс',
+            'material': 'Пластик',
+            'shape': 'Прямоугольные',
+            'is_polarized': 0,
+            'has_uv': 0
+        }, index=df.index)
+    
+    # Объединение с основными данными
+    train_data = df.copy()
+    for col, values in product_features.items():
+        train_data[col] = values
+    
+    # Добавление профилей магазинов
+    train_data['store_avg_price'] = train_data[columns_mapping['magazin']].map(
+        lambda x: store_profiles.get(x, {}).get('avg_price', 0)
+    )
+    train_data['store_volume'] = train_data[columns_mapping['magazin']].map(
+        lambda x: store_profiles.get(x, {}).get('total_sales', 0)
+    )
+    
+    # Признаки совместимости
+    train_data['price_match'] = abs(train_data[columns_mapping['price']] - train_data['store_avg_price']) / train_data['store_avg_price']
+    
+    # Ценовые сегменты
+    train_data['price_segment'] = pd.cut(train_data[columns_mapping['price']], 
+                                       bins=[0, 2000, 5000, float('inf')], 
+                                       labels=['Эконом', 'Средний', 'Премиум'])
+    
+    return train_data
+
+@st.cache_resource
+def train_model(train_data, target_col, feature_cols, cat_features):
+    """Обучение модели CatBoost"""
+    X = train_data[feature_cols].copy()
+    y = train_data[target_col]
+    
+    # Обработка пропусков
+    for col in X.columns:
+        if X[col].dtype == 'object':
+            X[col] = X[col].fillna('Unknown')
         else:
-            return 'Премиум'
+            X[col] = X[col].fillna(X[col].median())
     
-    def get_season(self, date):
-        """Определение сезона по дате"""
-        month = date.month
-        if month in [12, 1, 2]:
-            return 'Зима'
-        elif month in [3, 4, 5]:
-            return 'Весна'
-        elif month in [6, 7, 8]:
-            return 'Лето'
-        else:
-            return 'Осень'
+    model = CatBoostRegressor(
+        iterations=100,
+        depth=6,
+        learning_rate=0.1,
+        cat_features=cat_features,
+        verbose=False,
+        random_state=42
+    )
     
-    def prepare_training_data(self, df):
-        """Подготовка данных для обучения"""
-        try:
-            # Преобразование даты
-            df['Datasales'] = pd.to_datetime(df['Datasales'])
-            
-            # Извлечение признаков из описания
-            features_from_desc = df['Describe'].apply(self.extract_features_from_description)
-            features_df = pd.DataFrame(list(features_from_desc))
-            
-            # Объединение с основными данными
-            df = pd.concat([df, features_df], axis=1)
-            
-            # Добавление временных признаков
-            df['month'] = df['Datasales'].dt.month
-            df['season'] = df['Datasales'].apply(self.get_season)
-            df['day_of_week'] = df['Datasales'].dt.dayofweek
-            
-            # Добавление ценовых признаков
-            df['price_segment'] = df['Price'].apply(self.create_price_segment)
-            
-            # Агрегация по артикулам
-            agg_data = []
-            
-            for art in df['Art'].unique():
-                art_data = df[df['Art'] == art].sort_values('Datasales')
-                
-                if len(art_data) == 0:
-                    continue
-                    
-                # Первая дата продажи
-                launch_date = art_data['Datasales'].min()
-                
-                # Продажи за первые 30 дней
-                end_date = launch_date + timedelta(days=30)
-                sales_30_days = art_data[
-                    (art_data['Datasales'] >= launch_date) & 
-                    (art_data['Datasales'] <= end_date)
-                ]['Qty'].sum()
-                
-                # Характеристики из первой записи
-                first_record = art_data.iloc[0]
-                
-                agg_data.append({
-                    'Art': art,
-                    'Magazin': first_record['Magazin'],
-                    'Model': first_record['Model'],
-                    'Segment': first_record['Segment'],
-                    'Price': first_record['Price'],
-                    'frame_material': first_record['frame_material'],
-                    'frame_shape': first_record['frame_shape'],
-                    'lens_color': first_record['lens_color'],
-                    'gender': first_record['gender'],
-                    'is_polarized': first_record['is_polarized'],
-                    'has_uv_protection': first_record['has_uv_protection'],
-                    'price_segment': first_record['price_segment'],
-                    'launch_season': self.get_season(launch_date),
-                    'launch_month': launch_date.month,
-                    'sales_30_days': sales_30_days
-                })
-            
-            return pd.DataFrame(agg_data)
-        except Exception as e:
-            st.error(f"Ошибка при подготовке данных: {str(e)}")
-            return pd.DataFrame()
+    model.fit(X, y)
+    return model
+
+def predict_for_stores(model, new_product_features, stores, store_profiles, feature_cols):
+    """Прогноз для всех магазинов"""
+    predictions = {}
     
-    def train_model(self, df):
-        """Обучение модели"""
-        try:
-            # Подготовка признаков
-            self.feature_columns = [
-                'Price', 'frame_material', 'frame_shape', 'lens_color', 
-                'gender', 'is_polarized', 'has_uv_protection', 'price_segment',
-                'launch_season', 'launch_month', 'Segment'
-            ]
-            
-            self.categorical_features = [
-                'frame_material', 'frame_shape', 'lens_color', 
-                'gender', 'price_segment', 'launch_season', 'Segment'
-            ]
-            
-            X = df[self.feature_columns]
-            y = df['sales_30_days']
-            
-            # Обучение CatBoost
-            self.model = CatBoostRegressor(
-                iterations=100,
-                depth=6,
-                learning_rate=0.1,
-                cat_features=self.categorical_features,
-                verbose=False,
-                random_seed=42
-            )
-            
-            self.model.fit(X, y)
-            return self.model
-        except Exception as e:
-            st.error(f"Ошибка при обучении модели: {str(e)}")
-            return None
-    
-    def predict(self, features_dict):
-        """Прогнозирование для новой модели"""
-        if self.model is None:
-            return None
+    for store in stores:
+        # Создание строки с признаками для данного магазина
+        store_profile = store_profiles.get(store, {})
+        
+        prediction_row = new_product_features.copy()
+        prediction_row.update({
+            'store_avg_price': store_profile.get('avg_price', 3000),
+            'store_volume': store_profile.get('total_sales', 100),
+            'price_match': abs(new_product_features['price'] - store_profile.get('avg_price', 3000)) / store_profile.get('avg_price', 3000),
+            'magazin': store
+        })
+        
+        # Создание DataFrame для предсказания
+        pred_df = pd.DataFrame([prediction_row])
+        
+        # Обработка категориальных признаков
+        for col in pred_df.columns:
+            if col not in feature_cols:
+                continue
+            if pred_df[col].dtype == 'object':
+                pred_df[col] = pred_df[col].fillna('Unknown')
+            else:
+                pred_df[col] = pred_df[col].fillna(0)
         
         try:
-            # Создание DataFrame из словаря
-            df = pd.DataFrame([features_dict])
-            
-            # Проверка наличия всех нужных колонок
-            for col in self.feature_columns:
-                if col not in df.columns:
-                    df[col] = 0 if col in ['is_polarized', 'has_uv_protection'] else 'Другое'
-            
-            X = df[self.feature_columns]
-            prediction = self.model.predict(X)[0]
-            
-            return max(0, int(prediction))
-        except Exception as e:
-            st.error(f"Ошибка при прогнозировании: {str(e)}")
-            return None
+            pred = model.predict(pred_df[feature_cols])[0]
+            predictions[store] = max(0, pred)  # Не может быть отрицательных продаж
+        except:
+            predictions[store] = 0
     
-    def get_feature_importance(self):
-        """Получение важности признаков"""
-        if self.model is None:
-            return None
-        
-        try:
-            importance = self.model.get_feature_importance()
-            feature_names = self.feature_columns
-            
-            return pd.DataFrame({
-                'feature': feature_names,
-                'importance': importance
-            }).sort_values('importance', ascending=False)
-        except Exception as e:
-            st.error(f"Ошибка при получении важности признаков: {str(e)}")
-            return None
+    return predictions
 
-def create_metric_card(title, value, delta=None):
-    """Создание карточки с метрикой"""
-    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-    st.metric(title, value, delta)
-    st.markdown('</div>', unsafe_allow_html=True)
-
+# Основное приложение
 def main():
-    # Заголовок
-    st.markdown("""
-    <div style='text-align: center; padding: 2rem 0;'>
-        <h1 style='color: #667eea; font-size: 3rem; margin-bottom: 0;'>👓 Прогноз продаж очков</h1>
-        <p style='color: #764ba2; font-size: 1.2rem;'>Умная аналитика для успешного бизнеса</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Инициализация предиктора
-    if 'predictor' not in st.session_state:
-        st.session_state.predictor = GlassesSalesPredictor()
+    st.title("💖 Модный Советник по Продажам")
+    st.markdown("*Интеллектуальная система подбора магазинов для новых моделей очков*")
     
     # Боковая панель
     with st.sidebar:
-        st.markdown("### 📊 Навигация")
-        tab = st.selectbox(
-            "Выберите раздел:",
-            ["📈 Обучение модели", "🔮 Прогнозирование", "📋 Анализ важности"]
-        )
-    
-    if tab == "📈 Обучение модели":
-        st.markdown("### 📤 Загрузка данных")
-        
-        # Секция загрузки
-        st.markdown('<div class="upload-section">', unsafe_allow_html=True)
-        st.markdown("**Загрузите CSV файл с историческими данными о продажах**")
-        uploaded_file = st.file_uploader(
-            "Перетащите файл сюда или нажмите для выбора",
-            type=['csv'],
-            help="Файл должен содержать колонки: Magazin, Datasales, Art, Describe, Model, Segment, Price, Qty, Sum"
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.header("📁 Загрузка данных")
+        uploaded_file = st.file_uploader("Выберите файл с данными", type=['xlsx', 'csv'])
         
         if uploaded_file:
-            try:
-                # Загрузка данных
-                df = pd.read_csv(uploaded_file)
-                
-                # Проверка колонок
-                required_cols = ['Magazin', 'Datasales', 'Art', 'Describe', 'Model', 'Segment', 'Price', 'Qty']
-                missing_cols = [col for col in required_cols if col not in df.columns]
-                
-                if missing_cols:
-                    st.error(f"❌ Отсутствуют колонки: {', '.join(missing_cols)}")
-                    return
-                
-                st.success(f"✅ Данные загружены! Строк: {len(df)}")
+            df, success_rows, error_rows = safe_read_file(uploaded_file)
+            
+            if df is not None:
+                st.success(f"✅ Загружено: {success_rows} строк")
+                if error_rows > 0:
+                    st.warning(f"⚠️ Ошибки: {error_rows} строк")
                 
                 # Предварительный просмотр
-                with st.expander("👀 Предварительный просмотр данных"):
-                    st.dataframe(df.head())
+                with st.expander("👀 Предварительный просмотр"):
+                    st.dataframe(df.head(3))
                 
-                # Обучение модели
-                if st.button("🚀 Обучить модель", type="primary"):
-                    with st.spinner("🔄 Обрабатываем данные и обучаем модель..."):
-                        # Подготовка данных
-                        training_data = st.session_state.predictor.prepare_training_data(df)
-                        
-                        if len(training_data) == 0:
-                            st.error("❌ Не удалось подготовить данные для обучения")
-                            return
-                        
-                        # Обучение
-                        model = st.session_state.predictor.train_model(training_data)
-                        
-                        if model is not None:
-                            st.session_state.model_trained = True
-                            st.success("🎉 Модель успешно обучена!")
-                            
-                            # Статистика
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                create_metric_card("Моделей в обучении", len(training_data))
-                            
-                            with col2:
-                                avg_sales = training_data['sales_30_days'].mean()
-                                create_metric_card("Средние продажи за 30 дней", f"{avg_sales:.0f}")
-                            
-                            with col3:
-                                max_sales = training_data['sales_30_days'].max()
-                                create_metric_card("Максимальные продажи", f"{max_sales:.0f}")
+                # Настройка колонок
+                st.header("🎯 Настройка колонок")
+                columns = df.columns.tolist()
                 
-            except Exception as e:
-                st.error(f"❌ Ошибка при загрузке файла: {str(e)}")
+                columns_mapping = {
+                    'magazin': st.selectbox("Магазин:", columns, 
+                                          index=auto_detect_column(columns, ['magazin', 'магазин', 'store'])),
+                    'date': st.selectbox("Дата:", columns,
+                                       index=auto_detect_column(columns, ['date', 'дата', 'datasales'])),
+                    'price': st.selectbox("Цена:", columns,
+                                        index=auto_detect_column(columns, ['price', 'цена', 'стоимость'])),
+                    'qty': st.selectbox("Количество:", columns,
+                                      index=auto_detect_column(columns, ['qty', 'количество', 'кол'])),
+                    'describe': st.selectbox("Описание (опционально):", 
+                                           ["Не использовать"] + columns,
+                                           index=0)
+                }
+                
+                if columns_mapping['describe'] == "Не использовать":
+                    columns_mapping['describe'] = None
     
-    elif tab == "🔮 Прогнозирование":
-        if not hasattr(st.session_state, 'model_trained') or not st.session_state.model_trained:
-            st.warning("⚠️ Сначала обучите модель в разделе 'Обучение модели'")
-            return
+    # Основная область
+    if uploaded_file and df is not None:
+        # Создание профилей магазинов
+        with st.spinner("🔄 Анализ магазинов..."):
+            store_profiles = create_store_profiles(df, columns_mapping['magazin'], 
+                                                 columns_mapping['price'], columns_mapping['date'], 
+                                                 columns_mapping['qty'])
+            
+            # Подготовка данных для обучения
+            train_data = prepare_training_data(df, columns_mapping, store_profiles)
+            
+            # Определение признаков для модели
+            feature_cols = ['gender', 'material', 'shape', 'is_polarized', 'has_uv', 
+                          'store_avg_price', 'store_volume', 'price_match', 'price_segment', 
+                          columns_mapping['magazin']]
+            cat_features = ['gender', 'material', 'shape', 'price_segment', columns_mapping['magazin']]
+            
+            # Обучение модели
+            model = train_model(train_data, columns_mapping['qty'], feature_cols, cat_features)
         
-        st.markdown("### 🔮 Прогноз продаж новой модели")
+        st.success("🎯 Модель успешно обучена!")
         
-        # Форма для ввода параметров
+        # Интерфейс ввода новой модели
+        st.header("🆕 Характеристики новой модели")
+        
         col1, col2 = st.columns(2)
         
         with col1:
-            st.markdown("**💰 Коммерческие параметры**")
-            price = st.number_input("Цена (руб.)", min_value=500, max_value=50000, value=3000, step=100)
-            segment = st.selectbox("Сегмент", ["Солнцезащитные", "Оптические", "Спортивные"])
-            
-            st.markdown("**🎨 Дизайн оправы**")
-            frame_material = st.selectbox("Материал оправы", ["Металл", "Пластик", "Дерево", "Другое"])
-            frame_shape = st.selectbox("Форма оправы", ["Авиатор", "Вайфарер", "Кошачий глаз", "Круглые", "Прямоугольные", "Спортивные", "Другое"])
+            new_price = st.number_input("💰 Цена:", min_value=0, step=100, value=3000)
+            new_gender = st.selectbox("👤 Пол:", ["Мужские", "Женские", "Унисекс"])
+            new_material = st.selectbox("🔧 Материал:", ["Металл", "Пластик", "Дерево"])
+            new_shape = st.selectbox("🕶️ Форма:", ["Авиатор", "Вайфарер", "Круглые", "Прямоугольные", "Кошачий глаз"])
         
         with col2:
-            st.markdown("**👁️ Параметры линз**")
-            lens_color = st.selectbox("Цвет линз", ["Черный", "Коричневый", "Зеркальный", "Градиентный", "Синий", "Зеленый", "Другое"])
-            is_polarized = st.checkbox("🌟 Поляризационные линзы")
-            has_uv_protection = st.checkbox("☀️ UV защита")
+            new_polarized = st.checkbox("⚡ Поляризация")
+            new_uv = st.checkbox("🛡️ UV защита")
             
-            st.markdown("**👤 Целевая аудитория**")
-            gender = st.selectbox("Пол", ["Мужские", "Женские", "Унисекс"])
-            launch_month = st.selectbox("Месяц запуска", list(range(1, 13)), format_func=lambda x: f"{x} месяц")
+            # Определение ценового сегмента
+            if new_price <= 2000:
+                price_seg = "Эконом"
+            elif new_price <= 5000:
+                price_seg = "Средний"
+            else:
+                price_seg = "Премиум"
+            st.info(f"Ценовой сегмент: {price_seg}")
         
-        # Прогнозирование
-        if st.button("🔍 Получить прогноз", type="primary"):
-            # Подготовка данных
-            features = {
-                'Price': price,
-                'frame_material': frame_material,
-                'frame_shape': frame_shape,
-                'lens_color': lens_color,
-                'gender': gender,
-                'is_polarized': 1 if is_polarized else 0,
-                'has_uv_protection': 1 if has_uv_protection else 0,
-                'price_segment': st.session_state.predictor.create_price_segment(price),
-                'launch_season': st.session_state.predictor.get_season(datetime(2023, launch_month, 1)),
-                'launch_month': launch_month,
-                'Segment': segment
+        # Кнопка прогнозирования
+        if st.button("🎯 ПОДОБРАТЬ МАГАЗИНЫ", type="primary"):
+            # Подготовка данных новой модели
+            new_product = {
+                'price': new_price,
+                'gender': new_gender,
+                'material': new_material,
+                'shape': new_shape,
+                'is_polarized': int(new_polarized),
+                'has_uv': int(new_uv),
+                'price_segment': price_seg
             }
             
-            # Получение прогноза
-            prediction = st.session_state.predictor.predict(features)
+            # Получение прогнозов
+            stores = df[columns_mapping['magazin']].unique()
+            predictions = predict_for_stores(model, new_product, stores, store_profiles, feature_cols)
             
-            if prediction is not None:
-                # Результат
-                st.markdown("### 📊 Результат прогноза")
+            # Сортировка результатов
+            sorted_stores = sorted(predictions.items(), key=lambda x: x[1], reverse=True)
+            
+            # Отображение результатов
+            st.header("🏆 Рекомендации магазинов")
+            
+            # ТОП-10
+            st.subheader("✅ Лучшие магазины:")
+            for i, (store, pred) in enumerate(sorted_stores[:10]):
+                profile = store_profiles.get(store, {})
+                compatibility = max(0, 100 - abs(new_price - profile.get('avg_price', new_price)) / new_price * 100)
                 
                 col1, col2, col3 = st.columns(3)
                 with col1:
-                    create_metric_card("Прогноз продаж за 30 дней", f"{prediction} шт.")
-                
+                    st.metric(f"#{i+1} {store}", f"{pred:.0f} шт/мес")
                 with col2:
-                    revenue = prediction * price
-                    create_metric_card("Ожидаемая выручка", f"{revenue:,.0f} руб.")
-                
+                    st.metric("Совместимость", f"{compatibility:.0f}%")
                 with col3:
-                    if prediction < 30:
-                        recommendation = "🔴 Низкий спрос"
-                    elif prediction < 100:
-                        recommendation = "🟡 Средний спрос"
-                    else:
-                        recommendation = "🟢 Высокий спрос"
-                    create_metric_card("Рекомендация", recommendation)
-                
-                # Дополнительные рекомендации
-                st.markdown("### 💡 Рекомендации по закупке")
-                if prediction < 30:
-                    st.info("📉 Модель может показать слабые продажи. Рекомендуется ограниченная тестовая закупка.")
-                elif prediction < 100:
-                    st.success("📈 Модель имеет средний потенциал. Рекомендуется стандартная закупка.")
-                else:
-                    st.success("🚀 Модель имеет высокий потенциал! Рекомендуется увеличенная закупка.")
-    
-    elif tab == "📋 Анализ важности":
-        if not hasattr(st.session_state, 'model_trained') or not st.session_state.model_trained:
-            st.warning("⚠️ Сначала обучите модель в разделе 'Обучение модели'")
-            return
-        
-        st.markdown("### 📊 Важность признаков")
-        
-        # Получение важности признаков
-        importance_df = st.session_state.predictor.get_feature_importance()
-        
-        if importance_df is not None:
-            # График важности
-            fig = px.bar(
-                importance_df.head(10),
-                x='importance',
-                y='feature',
-                orientation='h',
-                title="Топ-10 наиболее важных признаков",
-                color='importance',
-                color_continuous_scale='Viridis'
-            )
-            fig.update_layout(
-                height=500,
-                yaxis={'categoryorder': 'total ascending'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
+                    st.metric("Средний чек", f"{profile.get('avg_price', 0):.0f} ₽")
             
-            # Таблица важности
-            st.markdown("### 📋 Детальная таблица важности")
-            st.dataframe(
-                importance_df.style.format({'importance': '{:.2f}'}),
-                use_container_width=True
-            )
+            # Анти-рекомендации
+            st.subheader("❌ Не рекомендуется:")
+            for store, pred in sorted_stores[-3:]:
+                st.write(f"• {store}: {pred:.0f} шт/мес (низкая совместимость)")
+            
+            # График
+            fig = px.bar(x=[s[0] for s in sorted_stores[:15]], 
+                        y=[s[1] for s in sorted_stores[:15]],
+                        title="Прогноз продаж по магазинам",
+                        labels={'x': 'Магазины', 'y': 'Прогноз (шт/мес)'})
+            fig.update_layout(xaxis_tickangle=-45)
+            st.plotly_chart(fig, use_container_width=True)
     
-    # Футер
-    st.markdown("---")
-    st.markdown(
-        "<div style='text-align: center; color: #666; padding: 1rem;'>"
-        "💜 Создано с любовью для успешного бизнеса"
-        "</div>",
-        unsafe_allow_html=True
-    )
+    else:
+        st.info("👆 Загрузите файл с данными для начала работы")
+        
+        # Демо данные
+        st.header("📊 Пример структуры данных")
+        demo_data = pd.DataFrame({
+            'Magazin': ['Оптика Люкс', 'Стиль Центр', 'Модные Очки'],
+            'Datasales': ['2024-01-15', '2024-01-16', '2024-01-17'],
+            'Art': ['RB001', 'OAK002', 'GUC003'],
+            'Price': [15000, 8000, 25000],
+            'Qty': [2, 5, 1],
+            'Describe': ['Ray-Ban авиаторы мужские металл поляризация', 
+                        'Oakley спортивные унисекс пластик UV400',
+                        'Gucci женские кошачий глаз премиум']
+        })
+        st.dataframe(demo_data)
 
 if __name__ == "__main__":
     main()
