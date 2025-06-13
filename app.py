@@ -45,10 +45,10 @@ def auto_detect_column(columns, keywords, default_index=0):
                 return i
     return min(default_index, len(columns) - 1 if columns else 0)
 
-def extract_features_from_description(descriptions):
-    """Упрощенное извлечение признаков из текстового описания с исправлением."""
-    # --- ИСПРАВЛЕНИЕ: Гарантируем, что работаем со строками ---
-    descriptions_str = descriptions.astype(str).fillna('')
+# Также замените и эту функцию для чистоты кода
+def extract_features_from_description(descriptions_str):
+    """Упрощенное извлечение признаков из текстового описания.
+       Принимает уже очищенную серию строк."""
     
     features = pd.DataFrame(index=descriptions_str.index)
     
@@ -60,7 +60,7 @@ def extract_features_from_description(descriptions):
     
     for feature_name, keywords in extraction_map.items():
         pattern = re.compile(f'({"|".join(keywords)})', re.IGNORECASE)
-        # Используем безопасную переменную descriptions_str
+        # Просто используем полученную на вход серию
         features[feature_name] = descriptions_str.str.findall(pattern).str[0].str.lower().fillna('не определен')
         
     return features
@@ -80,9 +80,12 @@ def process_data_and_train(_df, column_map, feature_config):
 
     all_features_df = pd.DataFrame(index=df.index)
     
-    # --- ИСПРАВЛЕНИЕ: Безопасная передача колонки с описанием ---
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
     if feature_config['describe_col'] != "Не использовать":
-        describe_series = df['Describe'].astype(str).fillna('')
+        # Используем переменную, а не жестко заданное имя 'Describe'
+        user_selected_describe_col = feature_config['describe_col']
+        # Гарантируем, что работаем со строками
+        describe_series = df[user_selected_describe_col].astype(str).fillna('')
         extracted = extract_features_from_description(describe_series)
         all_features_df = pd.concat([all_features_df, extracted], axis=1)
 
@@ -141,7 +144,6 @@ def process_data_and_train(_df, column_map, feature_config):
     }
     
     return final_model, features_to_use, metrics, None
-
 # ==============================================================================
 # ОСНОВНОЙ КОД ПРИЛОЖЕНИЯ
 # ==============================================================================
