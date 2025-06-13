@@ -43,14 +43,15 @@ def auto_detect_column(columns, keywords, default_index=0):
         for i, col in enumerate(columns):
             if keyword.lower() in col.lower():
                 return i
-    # Если ничего не найдено, возвращаем default_index, но не больше длины списка
     return min(default_index, len(columns) - 1 if columns else 0)
 
 def extract_features_from_description(descriptions):
-    """Упрощенное извлечение признаков из текстового описания."""
-    features = pd.DataFrame(index=descriptions.index)
+    """Упрощенное извлечение признаков из текстового описания с исправлением."""
+    # --- ИСПРАВЛЕНИЕ: Гарантируем, что работаем со строками ---
+    descriptions_str = descriptions.astype(str).fillna('')
     
-    # Словарь: имя нового признака -> [ключевые слова для поиска]
+    features = pd.DataFrame(index=descriptions_str.index)
+    
     extraction_map = {
         'brand_extracted': ['ray-ban', 'oakley', 'gucci', 'prada', 'polaroid'],
         'material_extracted': ['металл', 'пластик', 'дерево', 'комбинированный'],
@@ -58,9 +59,9 @@ def extract_features_from_description(descriptions):
     }
     
     for feature_name, keywords in extraction_map.items():
-        # Создаем паттерн RegEx, который найдет любое из ключевых слов
         pattern = re.compile(f'({"|".join(keywords)})', re.IGNORECASE)
-        features[feature_name] = descriptions.str.findall(pattern).str[0].str.lower().fillna('не определен')
+        # Используем безопасную переменную descriptions_str
+        features[feature_name] = descriptions_str.str.findall(pattern).str[0].str.lower().fillna('не определен')
         
     return features
 
@@ -70,29 +71,25 @@ def process_data_and_train(_df, column_map, feature_config):
     Основная функция: обрабатывает данные, извлекает признаки, обучает модель.
     """
     df = _df.copy()
-    # Переименовываем основные колонки для удобства
     df.rename(columns={v: k for k, v in column_map.items() if v}, inplace=True)
 
-    # 1. Валидация и очистка
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     df.dropna(subset=['date', 'Art', 'Magazin', 'Qty', 'Price'], inplace=True)
     df['Price'] = pd.to_numeric(df['Price'], errors='coerce').fillna(0)
     df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
 
-    # 2. Извлечение признаков
     all_features_df = pd.DataFrame(index=df.index)
     
-    # 2.1 Автоматическое извлечение из описания
+    # --- ИСПРАВЛЕНИЕ: Безопасная передача колонки с описанием ---
     if feature_config['describe_col'] != "Не использовать":
-        extracted = extract_features_from_description(df['Describe'])
+        describe_series = df['Describe'].astype(str).fillna('')
+        extracted = extract_features_from_description(describe_series)
         all_features_df = pd.concat([all_features_df, extracted], axis=1)
 
-    # 2.2 Добавление признаков из выбранных колонок
     for feature, source_col in feature_config['manual_features'].items():
         if source_col and source_col in df.columns:
             all_features_df[feature] = df[source_col].astype(str).fillna('не определен')
 
-    # 3. Агрегация данных
     df_with_features = pd.concat([df[['Art', 'Magazin', 'date', 'Qty', 'Price']], all_features_df], axis=1)
     df_with_features = df_with_features.sort_values(by=['Art', 'Magazin', 'date'])
     first_sale_dates = df_with_features.groupby(['Art', 'Magazin'])['date'].first().reset_index(name='first_sale_date')
@@ -107,8 +104,7 @@ def process_data_and_train(_df, column_map, feature_config):
     df_agg = df_30_days.groupby(['Art', 'Magazin'], as_index=False).agg(agg_logic)
     df_agg.rename(columns={'Qty': 'Qty_30_days'}, inplace=True)
 
-    # 4. Обучение модели
-    if len(df_agg) < 50: # Проверка на достаточность данных
+    if len(df_agg) < 50:
         return None, None, None, "Слишком мало данных для обучения после обработки."
 
     target = 'Qty_30_days'
@@ -123,7 +119,6 @@ def process_data_and_train(_df, column_map, feature_config):
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    # Optuna
     def objective(trial):
         params = {
             'iterations': 500, 'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
@@ -153,11 +148,9 @@ def process_data_and_train(_df, column_map, feature_config):
 
 st.title("💖 Модный Советник по Продажам")
 
-# Инициализация состояния
 if 'step' not in st.session_state:
     st.session_state.step = 1
 
-# --- Блок 1: Загрузка файла в боковой панели ---
 with st.sidebar:
     st.header("1. Загрузка данных")
     uploaded_file = st.file_uploader("Выберите файл Excel или CSV", type=["csv", "xlsx", "xls"])
@@ -178,7 +171,6 @@ if 'df_raw' in st.session_state:
     df_raw = st.session_state.df_raw
     available_columns = df_raw.columns.tolist()
 
-    # --- Блок 2: Настройка колонок ---
     st.header("2. Настройка датасета")
     with st.form("column_mapping_form"):
         st.subheader("🎯 Сопоставление основных колонок")
@@ -193,7 +185,6 @@ if 'df_raw' in st.session_state:
             col_price = st.selectbox("Колонка ЦЕНА:", available_columns, index=auto_detect_column(available_columns, ['price', 'цена'], 4))
             col_describe = st.selectbox("Колонка ОПИСАНИЕ ТОВАРА:", available_columns + ["Не использовать"], index=auto_detect_column(available_columns, ['describe', 'описание'], 5))
 
-        # --- Блок 3: Настройка признаков ---
         st.subheader("✋ Ручная настройка признаков товара")
         st.caption("Какие еще колонки содержат важную информацию о товаре? (например, Бренд, Цвет, Пол)")
         other_feature_cols = st.multiselect(
@@ -207,13 +198,11 @@ if 'df_raw' in st.session_state:
         st.session_state.step = 2
         column_map = {'Magazin': col_magazin, 'Art': col_art, 'date': col_date, 'Qty': col_qty, 'Price': col_price}
         
-        # Собираем конфигурацию признаков
         feature_config = {
             'describe_col': col_describe,
             'manual_features': {col: col for col in other_feature_cols}
         }
 
-        # Запускаем обработку и обучение
         model, features, metrics, error_msg = process_data_and_train(df_raw, column_map, feature_config)
 
         if error_msg:
@@ -223,10 +212,10 @@ if 'df_raw' in st.session_state:
         st.session_state.model = model
         st.session_state.features = features
         st.session_state.metrics = metrics
-        st.session_state.df_agg = df_agg # Сохраняем агрегированные данные для профилирования
-        st.session_state.feature_config = feature_config # Сохраняем для интерфейса ввода
+        # df_agg не сохраняем, так как он может быть большим и не нужен для предсказаний
+        st.session_state.all_stores = df_raw[col_magazin].unique()
+        st.session_state.feature_config = feature_config
 
-# --- Блок 4, 5, 6: Результаты и интерфейс предсказания ---
 if st.session_state.step == 2:
     st.header("3. Результаты обучения")
     metrics = st.session_state.metrics
@@ -234,7 +223,6 @@ if st.session_state.step == 2:
     c1.metric("Средняя ошибка (MAE)", f"{metrics['MAE']:.2f} шт.")
     c2.metric("Точность модели (R²)", f"{metrics['R2']:.2%}")
 
-    # --- 7. Аналитика: Важность признаков ---
     feature_importance_df = pd.DataFrame({
         'feature': st.session_state.features,
         'importance': st.session_state.model.get_feature_importance()
@@ -252,13 +240,11 @@ if st.session_state.step == 2:
         with c1:
             new_product_data['Price'] = st.number_input("💰 Цена модели:", min_value=0.0, step=100.0)
         
-        # Динамическое создание полей ввода
         manual_features_to_input = list(st.session_state.feature_config['manual_features'].keys())
         for i, feature in enumerate(manual_features_to_input):
-            with c1 if i % 2 == 0 else c2:
+            with c1 if (i+1) % 2 != 0 else c2:
                 new_product_data[feature] = st.text_input(f"🔹 {feature}:")
                 
-        # Если используется описание, добавляем поля для авто-извлеченных признаков
         if st.session_state.feature_config['describe_col'] != "Не использовать":
             st.info("Так как модель училась на авто-признаках из описания, введите их вручную:")
             with c2:
@@ -269,19 +255,22 @@ if st.session_state.step == 2:
         predict_button = st.form_submit_button("🎯 ПОДОБРАТЬ МАГАЗИНЫ", type="primary")
 
     if predict_button:
-        # --- 6. Система рекомендаций ---
         model = st.session_state.model
         features = st.session_state.features
-        all_stores = st.session_state.df_agg['Magazin'].unique()
+        all_stores = st.session_state.all_stores
         
-        # Создаем DataFrame для предсказания
         prediction_df = pd.DataFrame(columns=features)
         for store in all_stores:
             row = new_product_data.copy()
             row['Magazin'] = store
+            
+            # Добавляем недостающие колонки со значением по умолчанию, если их нет
+            for f in features:
+                if f not in row:
+                    row[f] = 'не определен'
+            
             prediction_df.loc[len(prediction_df)] = row
 
-        # Преобразуем типы как в обучении
         for col in prediction_df.columns:
             if col in model.get_cat_feature_indices():
                 prediction_df[col] = prediction_df[col].astype(str)
