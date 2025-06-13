@@ -54,9 +54,9 @@ def validate_dataframe(df: pd.DataFrame, required_columns: List[str]) -> bool:
     
     return True
 
-def safe_index_selection(columns: List[str], default_index: int = 0) -> int:
+def safe_index_selection(columns, default_index: int = 0) -> int:
     """Безопасный выбор индекса колонки"""
-    if not columns:
+    if len(columns) == 0:
         return 0
     return min(default_index, len(columns) - 1)
 
