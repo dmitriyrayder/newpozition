@@ -50,16 +50,32 @@ def auto_detect_column(columns, keywords, default_index=0):
 
 def extract_features_from_description(descriptions_str):
     """Упрощенное извлечение признаков из текстового описания.
-       Принимает уже очищенную серию строк."""
+       Принимает серию данных и безопасно обрабатывает их как строки."""
     features = pd.DataFrame(index=descriptions_str.index)
+    
+    # Безопасное преобразование в строки
+    descriptions_clean = descriptions_str.astype(str).fillna('').str.lower()
+    
     extraction_map = {
         'brand_extracted': ['ray-ban', 'oakley', 'gucci', 'prada', 'polaroid'],
         'material_extracted': ['металл', 'пластик', 'дерево', 'комбинированный'],
         'shape_extracted': ['авиатор', 'вайфарер', 'круглые', 'кошачий глаз']
     }
+    
     for feature_name, keywords in extraction_map.items():
-        pattern = re.compile(f'({"|".join(keywords)})', re.IGNORECASE)
-        features[feature_name] = descriptions_str.str.findall(pattern).str[0].str.lower().fillna('не определен')
+        # Создаем список для результатов
+        results = []
+        
+        for desc in descriptions_clean:
+            found = 'не определен'
+            for keyword in keywords:
+                if keyword.lower() in desc:
+                    found = keyword.lower()
+                    break
+            results.append(found)
+        
+        features[feature_name] = results
+    
     return features
 
 @st.cache_data
@@ -78,13 +94,19 @@ def process_data_and_train(_df, column_map, feature_config):
         if feature_config['describe_col'] != "Не использовать":
             user_selected_describe_col = feature_config['describe_col']
             if user_selected_describe_col in df.columns:
-                describe_series = df[user_selected_describe_col].astype(str).fillna('')
-                extracted = extract_features_from_description(describe_series)
-                all_features_df = pd.concat([all_features_df, extracted], axis=1)
+                # Безопасная обработка колонки описания
+                describe_series = df[user_selected_describe_col]
+                # Проверяем, что колонка не пустая
+                if not describe_series.empty:
+                    extracted = extract_features_from_description(describe_series)
+                    all_features_df = pd.concat([all_features_df, extracted], axis=1)
 
         for feature, source_col in feature_config['manual_features'].items():
             if source_col and source_col in df.columns:
-                all_features_df[feature] = df[source_col].astype(str).fillna('не определен')
+                # Безопасное преобразование в строки
+                feature_series = df[source_col]
+                if not feature_series.empty:
+                    all_features_df[feature] = feature_series.astype(str).fillna('не определен')
 
         # 2. Теперь, когда все данные извлечены, ПЕРЕИМЕНОВЫВАЕМ основные колонки
         # ИСПРАВЛЕНИЕ: Проверяем, что колонки существуют перед переименованием
@@ -98,15 +120,68 @@ def process_data_and_train(_df, column_map, feature_config):
             return None, None, None, f"Отсутствуют обязательные колонки после переименования: {missing_cols}"
 
         # 3. Валидация и очистка уже переименованных колонок
-        df['date'] = pd.to_datetime(df['date'], errors='coerce')
-        df.dropna(subset=['date', 'Art', 'Magazin', 'Qty', 'Price'], inplace=True)
+        # Статистика до обработки
+        initial_len = len(df)
+        initial_stats = {
+            'total_rows': initial_len,
+            'rows_with_required_fields': 0,
+            'rows_with_valid_dates': 0,
+            'rows_with_positive_values': 0
+        }
+        
+        # Безопасная обработка даты
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+            initial_stats['rows_with_valid_dates'] = df['date'].notna().sum()
+        
+        # Проверяем строки с заполненными обязательными полями
+        required_fields = ['date', 'Art', 'Magazin', 'Qty', 'Price']
+        rows_before_cleanup = df.dropna(subset=required_fields).shape[0]
+        initial_stats['rows_with_required_fields'] = rows_before_cleanup
+        
+        # Удаляем строки с пустыми ключевыми полями
+        df.dropna(subset=required_fields, inplace=True)
         
         # ИСПРАВЛЕНИЕ: Проверяем, остались ли данные после очистки
         if len(df) == 0:
             return None, None, None, "Все данные были удалены при очистке. Проверьте форматы дат и обязательных полей."
         
+        # Безопасная обработка числовых полей
         df['Price'] = pd.to_numeric(df['Price'], errors='coerce').fillna(0)
         df['Qty'] = pd.to_numeric(df['Qty'], errors='coerce').fillna(0)
+        
+        # Проверяем строки с положительными значениями
+        positive_values = (df['Price'] > 0) & (df['Qty'] > 0)
+        initial_stats['rows_with_positive_values'] = positive_values.sum()
+        
+        # Удаляем записи с нулевыми ценами и количествами
+        df = df[positive_values]
+        final_len = len(df)
+        
+        if final_len == 0:
+            return None, None, None, "Все данные были удалены: нет записей с положительными ценами и количествами."
+        
+        # Формируем детальную статистику обработки
+        processing_stats = f"""
+        📊 **Статистика обработки данных:**
+        - Исходное количество строк: **{initial_stats['total_rows']:,}**
+        - Строки с валидными датами: **{initial_stats['rows_with_valid_dates']:,}** ({initial_stats['rows_with_valid_dates']/initial_stats['total_rows']*100:.1f}%)
+        - Строки со всеми обязательными полями: **{initial_stats['rows_with_required_fields']:,}** ({initial_stats['rows_with_required_fields']/initial_stats['total_rows']*100:.1f}%)
+        - Строки с положительными ценами и количествами: **{initial_stats['rows_with_positive_values']:,}** ({initial_stats['rows_with_positive_values']/initial_stats['total_rows']*100:.1f}%)
+        - **Итоговое количество строк для обучения: {final_len:,}** ({final_len/initial_stats['total_rows']*100:.1f}%)
+        """
+        
+        # Показываем статистику пользователю
+        st.info(processing_stats)
+        
+        # Предупреждения о потере данных
+        data_loss_percent = (initial_stats['total_rows'] - final_len) / initial_stats['total_rows'] * 100
+        if data_loss_percent > 50:
+            st.warning(f"⚠️ Критическая потеря данных: {data_loss_percent:.1f}% строк удалено. Проверьте качество исходных данных.")
+        elif data_loss_percent > 20:
+            st.warning(f"⚠️ Значительная потеря данных: {data_loss_percent:.1f}% строк удалено.")
+        elif data_loss_percent > 0:
+            st.info(f"ℹ️ Удалено {data_loss_percent:.1f}% некорректных строк.")
         
         # 4. Агрегация данных
         df_with_features = pd.concat([df[['Art', 'Magazin', 'date', 'Qty', 'Price']], all_features_df], axis=1)
@@ -213,6 +288,7 @@ with st.sidebar:
 
     if uploaded_file:
         try:
+            # Первая попытка чтения без специальных параметров
             if uploaded_file.name.endswith('.csv'):
                 df = pd.read_csv(uploaded_file, encoding='utf-8')
             else:
@@ -223,12 +299,84 @@ with st.sidebar:
                 st.error("Загруженный файл пустой!")
                 st.stop()
             
+            # Пытаемся найти колонку с датами для специальной обработки
+            date_columns = []
+            for col in df.columns:
+                if any(keyword in col.lower() for keyword in ['date', 'дата', 'datasales']):
+                    date_columns.append(col)
+            
+            # Если найдены колонки с датами, перечитываем файл с правильными типами
+            if date_columns:
+                try:
+                    dtype_dict = {}
+                    for date_col in date_columns:
+                        dtype_dict[date_col] = 'datetime64[ns]'
+                    
+                    if uploaded_file.name.endswith('.csv'):
+                        df_with_dates = pd.read_csv(uploaded_file, encoding='utf-8', dtype=dtype_dict, parse_dates=date_columns)
+                    else:
+                        df_with_dates = pd.read_excel(uploaded_file, dtype=dtype_dict, parse_dates=date_columns)
+                    
+                    # Сравниваем количество успешно прочитанных строк
+                    original_rows = len(df)
+                    processed_rows = len(df_with_dates)
+                    
+                    if processed_rows >= original_rows * 0.8:  # Если потеряли менее 20%
+                        df = df_with_dates
+                        st.info(f"✅ Даты успешно обработаны в колонках: {', '.join(date_columns)}")
+                    else:
+                        st.warning(f"⚠️ Специальная обработка дат привела к потере данных. Используем стандартное чтение.")
+                        
+                except Exception as date_error:
+                    st.warning(f"⚠️ Не удалось автоматически обработать даты: {date_error}")
+            
             st.session_state.df_raw = df
-            st.success(f"Файл успешно загружен! Строк: {len(df)}, Колонок: {len(df.columns)}")
+            
+            # Статистика датасета
+            total_cells = len(df) * len(df.columns)
+            empty_cells = df.isnull().sum().sum()
+            filled_cells = total_cells - empty_cells
+            fill_percentage = (filled_cells / total_cells * 100) if total_cells > 0 else 0
+            
+            st.success(f"📊 Файл успешно загружен!")
+            
+            # Детальная статистика
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Строк", f"{len(df):,}")
+            with col2:
+                st.metric("Колонок", f"{len(df.columns):,}")
+            with col3:
+                st.metric("Заполненность", f"{fill_percentage:.1f}%")
+            
+            # Дополнительная статистика по строкам
+            with st.expander("📈 Детальная статистика данных"):
+                rows_with_data = df.dropna(how='all').shape[0]
+                empty_rows = len(df) - rows_with_data
+                
+                st.write("**Статистика по строкам:**")
+                stat_col1, stat_col2 = st.columns(2)
+                with stat_col1:
+                    st.metric("Строки с данными", f"{rows_with_data:,}")
+                    st.metric("Пустые строки", f"{empty_rows:,}")
+                with stat_col2:
+                    valid_percentage = (rows_with_data / len(df) * 100) if len(df) > 0 else 0
+                    st.metric("% строк с данными", f"{valid_percentage:.1f}%")
+                    empty_percentage = (empty_rows / len(df) * 100) if len(df) > 0 else 0
+                    st.metric("% пустых строк", f"{empty_percentage:.1f}%")
+                
+                st.write("**Статистика по колонкам:**")
+                col_stats = pd.DataFrame({
+                    'Колонка': df.columns,
+                    'Заполнено': df.count(),
+                    'Пусто': df.isnull().sum(),
+                    '% заполнено': (df.count() / len(df) * 100).round(1)
+                })
+                st.dataframe(col_stats, use_container_width=True)
             
             # Показываем превью данных
-            with st.expander("Превью данных"):
-                st.dataframe(df.head())
+            with st.expander("👀 Превью данных"):
+                st.dataframe(df.head(10))
                 
         except Exception as e:
             st.error(f"Ошибка чтения файла: {e}")
