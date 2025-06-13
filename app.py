@@ -55,7 +55,6 @@ def safe_read_file(uploaded_file):
         for col in date_cols:
             try:
                 df[col] = pd.to_datetime(df[col])
-                df[col] = df[col].astype('datetime64[ns]')
             except:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
         
