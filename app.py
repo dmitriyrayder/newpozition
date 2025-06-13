@@ -12,43 +12,16 @@ st.set_page_config(page_title="Модный Советник", layout="wide", in
 st.markdown("""
 <style>
 /* Основной фон приложения */
-.main {
-    background-color: #fce4ec; /* Нежно-розовый */
-}
-/* Заголовок H1 */
-h1 {
-    font-family: 'Comic Sans MS', cursive, sans-serif;
-    color: #e91e63; /* Ярко-розовый */
-    text-align: center;
-    text-shadow: 2px 2px 4px #f8bbd0;
-}
-/* Подзаголовки H2, H3 */
-h2, h3 {
-    font-family: 'Comic Sans MS', cursive, sans-serif;
-    color: #ad1457; /* Глубокий розовый */
-}
-/* Стилизация кнопки */
+.main { background-color: #fce4ec; }
+h1 { font-family: 'Comic Sans MS', cursive, sans-serif; color: #e91e63; text-align: center; text-shadow: 2px 2px 4px #f8bbd0; }
+h2, h3 { font-family: 'Comic Sans MS', cursive, sans-serif; color: #ad1457; }
 .stButton>button {
-    color: white;
-    background-image: linear-gradient(to right, #f06292, #e91e63);
-    border-radius: 25px;
-    border: 2px solid #ad1457;
-    padding: 12px 28px;
-    font-weight: bold;
-    font-size: 18px;
-    box-shadow: 0 4px 15px 0 rgba(233, 30, 99, 0.4);
-    transition: all 0.3s ease 0s;
+    color: white; background-image: linear-gradient(to right, #f06292, #e91e63); border-radius: 25px;
+    border: 2px solid #ad1457; padding: 12px 28px; font-weight: bold; font-size: 18px;
+    box-shadow: 0 4px 15px 0 rgba(233, 30, 99, 0.4); transition: all 0.3s ease 0s;
 }
-.stButton>button:hover {
-    background-position: right center;
-    box-shadow: 0 4px 15px 0 rgba(233, 30, 99, 0.75);
-}
-/* Стилизация контейнера Expander */
-.stExpander {
-    border: 2px solid #f8bbd0;
-    border-radius: 10px;
-    background-color: #fff1f8;
-}
+.stButton>button:hover { background-position: right center; box-shadow: 0 4px 15px 0 rgba(233, 30, 99, 0.75); }
+.stExpander { border: 2px solid #f8bbd0; border-radius: 10px; background-color: #fff1f8; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -56,95 +29,85 @@ st.title("💖 Модный Советник по Продажам 💖")
 
 # --- БЛОК ВСПОМОГАТЕЛЬНЫХ ФУНКЦИЙ ---
 
-def find_and_convert_date_column(df):
-    potential_date_cols = ['Datasales', 'datasales', 'date', 'Date', 'Дата', 'дата_продажи', 'timestamp']
+def suggest_date_column(df):
+    """Предполагает, какая колонка является датой, но не преобразует ее."""
+    potential_date_cols = [
+        'Datasales', 'datasales', 'date', 'Date', 'data', 'Дата', 'дата_продажи', 'timestamp'
+    ]
     for col_name in potential_date_cols:
         if col_name in df.columns:
-            st.info(f"Найдена колонка с датой: '{col_name}'. Преобразую... ✨")
-            try:
-                df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
-                if df[col_name].notna().sum() / len(df) > 0.8: return df, col_name
-            except Exception: continue
-    
-    st.warning("Не нашла колонку с датой по имени, ищу по содержимому...")
+            return col_name
+    # Если по имени не нашли, ищем по содержимому (но менее агрессивно)
     for col_name in df.select_dtypes(include=['object']).columns:
         try:
-            converted_col = pd.to_datetime(df[col_name], errors='coerce')
-            if converted_col.notna().sum() / len(df) > 0.8:
-                st.success(f"Нашла! ✨ Колонка с датой: '{col_name}'.")
-                df[col_name] = converted_col
-                return df, col_name
-        except Exception: continue
-    return df, None
+            # Проверяем, можно ли преобразовать хотя бы часть строк
+            if pd.to_datetime(df[col_name], errors='coerce', infer_datetime_format=True).notna().sum() > 0:
+                 # Проверяем, что в названии есть намек на дату
+                if any(substr in col_name.lower() for substr in ['date', 'дата', 'day', 'день']):
+                    return col_name
+        except Exception:
+            continue
+    return None
 
-def display_data_stats(df_raw, df_clean, date_col_name):
+def display_data_stats(total_rows, clean_rows, bad_date_rows, df_agg, date_col_name):
     with st.expander("📊 Смотрим на твои данные...", expanded=True):
         col1, col2, col3 = st.columns(3)
-        col1.metric("Строк в файле 💅", f"{len(df_raw)}")
-        col2.metric("Строк для анализа 💎", f"{len(df_clean)}")
-        col3.metric("Удалено лишних 🗑️", f"{len(df_raw) - len(df_clean)}")
+        col1.metric("Строк в файле 💅", f"{total_rows}")
+        col2.metric("Строк для анализа 💎", f"{clean_rows}", help="Строки с заполненными 'Qty', 'Art', 'Magazin' и корректной датой.")
+        col3.metric("Удалено из-за ошибок 🗑️", f"{(total_rows - clean_rows)}", help=f"Включая {bad_date_rows} строк с некорректным форматом даты в колонке '{date_col_name}'.")
         st.success(f"""
-        - **Уникальных моделей очков:** {df_clean['Art'].nunique()} 🕶️
-        - **Уникальных бутиков:** {df_clean['Magazin'].nunique()} 🏬
-        - **Период продаж:** с {df_clean[date_col_name].min().strftime('%d.%m.%Y')} по {df_clean[date_col_name].max().strftime('%d.%m.%Y')} 🗓️
+        - **Уникальных моделей очков:** {df_agg['Art'].nunique()} 🕶️
+        - **Уникальных бутиков:** {df_agg['Magazin'].nunique()} 🏬
+        - **Период продаж:** с {df_agg['first_sale_date'].min().strftime('%d.%m.%Y')} по {df_agg['first_sale_date'].max().strftime('%d.%m.%Y')} 🗓️
         """)
 
 @st.cache_data
-def load_and_prepare_data(uploaded_file):
-    try:
-        # Чтение CSV или Excel
-        if uploaded_file.name.endswith('.csv'):
-            df_raw = pd.read_csv(uploaded_file)
-        elif uploaded_file.name.endswith(('.xlsx', '.xls')):
-            df_raw = pd.read_excel(uploaded_file, engine='openpyxl')
-        else:
-            st.error("Ой! Я не знаю такой формат файла. Попробуй .csv, .xlsx или .xls 🎀")
-            return None
-    except Exception as e:
-        st.error(f"Не могу прочитать файл, дорогая! Ошибка: {e}")
-        return None
-
-    df, date_col_name = find_and_convert_date_column(df_raw.copy())
-    if not date_col_name:
-        st.error("Не нашла колонку с датой в файле. Проверь, пожалуйста! 🥺")
-        return None
+def process_and_aggregate(df, date_col_name):
+    """Основная функция обработки данных, кэшируется."""
+    initial_rows = len(df)
     
-    crucial_cols = ['Qty', 'Art', 'Magazin', date_col_name]
+    # 1. Принудительное преобразование даты и удаление ошибок
+    df[date_col_name] = pd.to_datetime(df[date_col_name], errors='coerce')
+    rows_before_date_drop = len(df)
+    df.dropna(subset=[date_col_name], inplace=True)
+    rows_after_date_drop = len(df)
+    bad_date_rows = rows_before_date_drop - rows_after_date_drop
+
+    # 2. Удаление пропусков в ключевых колонках
+    crucial_cols = ['Qty', 'Art', 'Magazin']
     df_clean = df.dropna(subset=crucial_cols).copy()
-    display_data_stats(df_raw, df_clean, date_col_name)
-
-    st.info("Агрегирую продажи за первые 30 дней... Магия в процессе! ✨")
+    
+    # 3. Агрегация
     df_clean = df_clean.sort_values(by=['Art', 'Magazin', date_col_name])
-    
-    # --- ИСПРАВЛЕННЫЙ БЛОК ДЛЯ ИЗБЕЖАНИЯ ОШИБКИ ---
-    # Получаем серию с первыми датами
     series_of_first_dates = df_clean.groupby(['Art', 'Magazin'])[date_col_name].first()
-    # Безопасно сбрасываем индекс, сразу давая столбцу с датами новое имя 'first_sale_date'
     first_sale_dates = series_of_first_dates.reset_index(name='first_sale_date')
-    # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---
-    
     df_merged = pd.merge(df_clean, first_sale_dates, on=['Art', 'Magazin'])
     df_30_days = df_merged[df_merged[date_col_name] <= (df_merged['first_sale_date'] + pd.Timedelta(days=30))].copy()
-
     agg_logic = {
-        'Qty': 'sum', 'Sum': 'sum', 'Price': 'mean', 'Model': 'first', 'brand': 'first', 
-        'Segment': 'first', 'color': 'first', 'formaoprav': 'first', 'Sex': 'first', 'Metal-Plastic': 'first'
+        'Qty': 'sum', 'Sum': 'sum', 'Price': 'mean', 'Model': 'first', 'brand': 'first',
+        'Segment': 'first', 'color': 'first', 'formaoprav': 'first', 'Sex': 'first', 'Metal-Plastic': 'first',
+        'first_sale_date': 'first' # Добавляем для статистики
     }
     df_agg = df_30_days.groupby(['Art', 'Magazin'], as_index=False).agg(agg_logic)
     df_agg.rename(columns={'Qty': 'Qty_30_days'}, inplace=True)
-    return df_agg
+
+    stats = {
+        "total_rows": initial_rows, 
+        "clean_rows": len(df_agg), 
+        "bad_date_rows": bad_date_rows
+    }
+    return df_agg, stats
 
 @st.cache_resource
 def train_model_with_optuna(_df_agg):
+    # (Эта функция без изменений)
     target, cat_features = 'Qty_30_days', ['Magazin', 'brand', 'Segment', 'color', 'formaoprav', 'Sex', 'Metal-Plastic']
-    df_processed = _df_agg.drop(columns=['Sum', 'Art', 'Model'], errors='ignore')
+    df_processed = _df_agg.drop(columns=['Sum', 'Art', 'Model', 'first_sale_date'], errors='ignore')
     features = [col for col in df_processed.columns if col != target]
     for col in cat_features:
         if col in df_processed.columns: df_processed[col] = df_processed[col].astype(str)
-
     X, y = df_processed[features], df_processed[target]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
-
     with st.spinner("🔮 Подбираю лучшие волшебные параметры для модели..."):
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(direction='minimize')
@@ -152,7 +115,6 @@ def train_model_with_optuna(_df_agg):
             iterations=1000, learning_rate=trial.suggest_float('learning_rate', 0.01, 0.3),
             depth=trial.suggest_int('depth', 4, 10), verbose=0, random_seed=42
         ).fit(X_train, y_train, cat_features=cat_features, eval_set=(X_test, y_test), early_stopping_rounds=50, use_best_model=True).predict(X_test)), n_trials=30)
-    
     st.success(f"Волшебство сработало! 💫 Лучшие параметры: {study.best_params}")
     final_model = CatBoostRegressor(**study.best_params, iterations=1500, verbose=0, random_seed=42).fit(X, y, cat_features=cat_features)
     test_preds = final_model.predict(X_test)
@@ -163,10 +125,40 @@ def train_model_with_optuna(_df_agg):
 dataset_file = st.file_uploader("💖 Загрузи свой файл с продажами (.xlsx, .xls, .csv)", type=["csv", "xlsx", "xls"])
 
 if dataset_file:
-    df_agg = load_and_prepare_data(dataset_file)
+    try:
+        if dataset_file.name.endswith('.csv'):
+            df_raw = pd.read_csv(dataset_file)
+        else:
+            df_raw = pd.read_excel(dataset_file, engine='openpyxl')
+    except Exception as e:
+        st.error(f"Не могу прочитать файл, дорогая! Ошибка: {e}")
+        st.stop()
+    
+    # --- НОВЫЙ БЛОК: РУЧНОЙ ВЫБОР КОЛОНКИ С ДАТОЙ ---
+    st.subheader("Шаг 1: Проверка данных 🧐")
+    suggested_col = suggest_date_column(df_raw)
+    all_columns = df_raw.columns.tolist()
+    
+    if suggested_col and suggested_col in all_columns:
+        default_index = all_columns.index(suggested_col)
+    else:
+        default_index = 0
+        
+    date_col_name = st.selectbox(
+        "🎀 Я думаю, колонка с датой это...",
+        options=all_columns,
+        index=default_index,
+        help="Пожалуйста, выбери колонку, где указана дата продажи. Я постаралась угадать сама!"
+    )
+    
+    df_agg, stats = process_and_aggregate(df_raw, date_col_name)
+    display_data_stats(stats['total_rows'], stats['clean_rows'], stats['bad_date_rows'], df_agg, date_col_name)
+
     if df_agg is not None and not df_agg.empty:
+        st.subheader("Шаг 2: Создание прогноза 🧙‍♀️")
         model, features, metrics = train_model_with_optuna(df_agg)
         if model:
+            # (Остальная часть кода без изменений)
             st.header("📊 Оценка моей работы")
             col1, col2 = st.columns(2)
             col1.metric("Средняя ошибка (MAE)", f"{metrics['MAE']:.2f} шт.", "+/- столько я могу ошибиться")
