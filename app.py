@@ -92,7 +92,7 @@ def display_data_stats(df_raw, df_clean, date_col_name):
 @st.cache_data
 def load_and_prepare_data(uploaded_file):
     try:
-        # --- ИЗМЕНЕНИЕ: Чтение CSV или Excel ---
+        # Чтение CSV или Excel
         if uploaded_file.name.endswith('.csv'):
             df_raw = pd.read_csv(uploaded_file)
         elif uploaded_file.name.endswith(('.xlsx', '.xls')):
@@ -115,7 +115,14 @@ def load_and_prepare_data(uploaded_file):
 
     st.info("Агрегирую продажи за первые 30 дней... Магия в процессе! ✨")
     df_clean = df_clean.sort_values(by=['Art', 'Magazin', date_col_name])
-    first_sale_dates = df_clean.groupby(['Art', 'Magazin'])[date_col_name].first().reset_index().rename(columns={date_col_name: 'first_sale_date'})
+    
+    # --- ИСПРАВЛЕННЫЙ БЛОК ДЛЯ ИЗБЕЖАНИЯ ОШИБКИ ---
+    # Получаем серию с первыми датами
+    series_of_first_dates = df_clean.groupby(['Art', 'Magazin'])[date_col_name].first()
+    # Безопасно сбрасываем индекс, сразу давая столбцу с датами новое имя 'first_sale_date'
+    first_sale_dates = series_of_first_dates.reset_index(name='first_sale_date')
+    # --- КОНЕЦ ИСПРАВЛЕННОГО БЛОКА ---
+    
     df_merged = pd.merge(df_clean, first_sale_dates, on=['Art', 'Magazin'])
     df_30_days = df_merged[df_merged[date_col_name] <= (df_merged['first_sale_date'] + pd.Timedelta(days=30))].copy()
 
@@ -139,6 +146,7 @@ def train_model_with_optuna(_df_agg):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
 
     with st.spinner("🔮 Подбираю лучшие волшебные параметры для модели..."):
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
         study = optuna.create_study(direction='minimize')
         study.optimize(lambda trial: mean_absolute_error(y_test, CatBoostRegressor(
             iterations=1000, learning_rate=trial.suggest_float('learning_rate', 0.01, 0.3),
