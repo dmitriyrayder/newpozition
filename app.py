@@ -72,7 +72,7 @@ def display_data_stats(df_raw, df_clean, date_col_name):
 def load_and_prepare_data(uploaded_file):
     """Загружает, проверяет, очищает и агрегирует данные."""
     try:
-        df_raw = pd.read_csv(uploaded_file)
+        df_raw = pd.read_xlsx(uploaded_file)
     except Exception as e:
         st.error(f"Ошибка чтения файла: {e}")
         return None
@@ -159,7 +159,7 @@ def train_model_with_optuna(_df_agg):
 
 # --- ОСНОВНОЙ БЛОК STREAMLIT ---
 
-dataset_file = st.file_uploader("\U0001F4C2 Загрузите CSV-файл с данными о продажах", type=["csv"])
+dataset_file = st.file_uploader("\U0001F4C2 Загрузите xlsx-файл с данными о продажах", type=["xlsx"])
 
 if dataset_file:
     df_agg = load_and_prepare_data(dataset_file)
