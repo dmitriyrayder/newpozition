@@ -406,4 +406,4 @@ if dataset_file:
             with col2:
                 st.metric("Колонок", len(df_raw.columns))
             with col3:
-                st.metric("Размер (MB)", f"{dataset_file.size / (1024*1024)
+                st.metric("Размер (MB)", f"{dataset_file.size / (1024*1024) }
