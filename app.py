@@ -406,4 +406,197 @@ if dataset_file:
             with col2:
                 st.metric("Колонок", len(df_raw.columns))
             with col3:
-                st.metric("Размер (MB)", f"{dataset_file.size / (1024*1024) }
+                st.metric("Размер (MB)", f"{dataset_file.size / (1024*1024):.2f}")
+            
+            st.dataframe(df_raw.head(10), use_container_width=True)
+        
+        # Настройка колонок
+        st.subheader("🔧 Настройка данных")
+        
+        # Основные колонки
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.write("**Основные колонки** (обязательно):")
+            cols = st.columns(5)
+            
+            with cols[0]:
+                art_col = st.selectbox(
+                    "Артикул товара",
+                    options=df_raw.columns,
+                    index=safe_index_selection(df_raw.columns, 0)
+                )
+            
+            with cols[1]:
+                magazin_col = st.selectbox(
+                    "Магазин/Бутик",
+                    options=df_raw.columns,
+                    index=safe_index_selection(df_raw.columns, 1)
+                )
+            
+            with cols[2]:
+                date_col = st.selectbox(
+                    "Дата продажи",
+                    options=df_raw.columns,
+                    index=safe_index_selection(df_raw.columns, 2)
+                )
+            
+            with cols[3]:
+                qty_col = st.selectbox(
+                    "Количество",
+                    options=df_raw.columns,
+                    index=safe_index_selection(df_raw.columns, 3)
+                )
+            
+            with cols[4]:
+                price_col = st.selectbox(
+                    "Цена",
+                    options=df_raw.columns,
+                    index=safe_index_selection(df_raw.columns, 4)
+                )
+        
+        with col2:
+            st.write("**Дополнительные признаки** (необязательно):")
+            
+            # Выбор дополнительных категориальных признаков
+            required_cols = [art_col, magazin_col, date_col, qty_col, price_col]
+            available_cols = [col for col in df_raw.columns if col not in required_cols]
+            
+            cat_features = st.multiselect(
+                "Выберите категориальные признаки",
+                options=available_cols,
+                help="Например: размер, цвет, коллекция, бренд, сезон"
+            )
+        
+        # Кнопка обработки данных
+        if st.button(
+            "🚀 Обработать данные и обучить модель",
+            type="primary",
+            use_container_width=True
+        ):
+            # Валидация
+            required_columns = [art_col, magazin_col, date_col, qty_col, price_col]
+            
+            if validate_dataframe(df_raw, required_columns):
+                with st.spinner("🔄 Обрабатываем данные..."):
+                    # Обработка и агрегация данных
+                    df_agg, stats = process_and_aggregate(
+                        df_raw, art_col, magazin_col, date_col, 
+                        qty_col, price_col, tuple(cat_features)
+                    )
+                    
+                    if len(df_agg) > 0:
+                        st.session_state.df_agg = df_agg
+                        st.session_state.stats = stats
+                        st.session_state.cat_features = cat_features
+                        
+                        # Отображение статистики
+                        st.success("✅ Данные успешно обработаны!")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Записей для обучения", stats['final_rows'])
+                        with col2:
+                            st.metric("Уникальных товаров", stats['unique_products'])
+                        with col3:
+                            st.metric("Бутиков", stats['unique_stores'])
+                        with col4:
+                            st.metric("Очищено строк", stats['outliers_removed'])
+                        
+                        # Обучение модели
+                        with st.spinner("🧠 Обучаем модель..."):
+                            model, features, metrics = train_model_with_optuna(
+                                df_agg, tuple(cat_features), n_trials=30
+                            )
+                            
+                            st.session_state.model = model
+                            st.session_state.features = features
+                            st.session_state.metrics = metrics
+                            st.session_state.processed = True
+                            
+                            st.success("🎯 Модель успешно обучена!")
+                            
+                            # Метрики модели
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Средняя ошибка (MAE)", f"{metrics['MAE']:.2f}")
+                            with col2:
+                                st.metric("Коэффициент детерминации (R²)", f"{metrics['R2']:.3f}")
+                    else:
+                        st.error("❌ После обработки не осталось данных для анализа!")
+
+# Прогнозирование
+if st.session_state.get('processed', False):
+    st.divider()
+    st.subheader("🔮 Прогнозирование продаж")
+    
+    # Форма для прогнозирования
+    submitted, new_product_data = create_prediction_form(
+        st.session_state.cat_features,
+        st.session_state.df_agg
+    )
+    
+    if submitted:
+        # Создание прогнозов
+        predictions_df = make_predictions(
+            st.session_state.model,
+            st.session_state.features,
+            new_product_data,
+            st.session_state.df_agg
+        )
+        
+        if not predictions_df.empty:
+            st.success("🎉 Прогноз готов!")
+            
+            # Отображение результатов
+            st.subheader("📈 Результаты прогнозирования")
+            
+            # Топ-3 магазина
+            top_3 = predictions_df.head(3)
+            
+            col1, col2, col3 = st.columns(3)
+            for i, (_, row) in enumerate(top_3.iterrows()):
+                with [col1, col2, col3][i]:
+                    st.metric(
+                        f"🥇 {row['Бутик']}" if i == 0 else f"🥈 {row['Бутик']}" if i == 1 else f"🥉 {row['Бутик']}",
+                        f"{int(row['Прогноз продаж (30 дней, шт.)'])} шт.",
+                        f"{int(row['Рейтинг успеха (%)'])}%"
+                    )
+            
+            # Полная таблица результатов
+            st.dataframe(
+                predictions_df,
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Кнопка скачивания
+            csv = predictions_df.to_csv(index=False)
+            st.download_button(
+                label="💾 Скачать прогноз (CSV)",
+                data=csv,
+                file_name="fashion_sales_forecast.csv",
+                mime="text/csv"
+            )
+
+# Справка
+with st.sidebar:
+    st.header("ℹ️ Справка")
+    st.markdown("""
+    **Как использовать:**
+    1. Загрузите файл с данными о продажах
+    2. Настройте соответствие колонок
+    3. Выберите дополнительные признаки
+    4. Нажмите "Обработать данные"
+    5. Заполните характеристики товара
+    6. Получите прогноз по всем бутикам
+    
+    **Требования к данным:**
+    - Минимум 10 записей
+    - Обязательные колонки: артикул, магазин, дата, количество, цена
+    - Форматы файлов: CSV, Excel
+    """)
+    
+    if st.session_state.get('processed', False):
+        st.success("✅ Модель готова к использованию!")
+        st.info(f"Точность модели: R² = {st.session_state.metrics['R2']:.3f}")
