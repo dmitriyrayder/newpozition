@@ -30,26 +30,29 @@ st.title("💖 Модный Советник по Продажам 💖")
 # --- БЛОК ВСПОМОГАТЕЛЬНЫХ ФУНКЦИЙ ---
 
 @st.cache_data
-def process_and_aggregate(_df, column_map):
-    """Основная функция обработки данных, кэшируется."""
+def process_and_aggregate(_df, art_col, magazin_col, date_col, qty_col, price_col, cat_features_tuple):
+    """
+    Основная функция обработки данных. Принимает простые типы данных для кэширования.
+    """
     df = _df.copy()
+    cat_features = list(cat_features_tuple) # Превращаем кортеж обратно в список
     
-    # Переименовываем колонки в стандартные имена для удобства
-    internal_map = {v: k for k, v in column_map.items()}
-    df.rename(columns=internal_map, inplace=True)
+    # Создаем карту переименования
+    column_map = {
+        art_col: 'Art', magazin_col: 'Magazin', date_col: 'date',
+        qty_col: 'Qty', price_col: 'Price'
+    }
+    df.rename(columns=column_map, inplace=True)
     
     initial_rows = len(df)
     
-    # 1. Обработка дат
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     bad_date_rows = df['date'].isna().sum()
     df.dropna(subset=['date'], inplace=True)
 
-    # 2. Удаление пропусков в ключевых колонках
     crucial_cols = ['Qty', 'Art', 'Magazin', 'Price']
     df.dropna(subset=crucial_cols, inplace=True)
     
-    # 3. Агрегация
     df = df.sort_values(by=['Art', 'Magazin', 'date'])
     series_of_first_dates = df.groupby(['Art', 'Magazin'])['date'].first()
     first_sale_dates = series_of_first_dates.reset_index(name='first_sale_date')
@@ -57,28 +60,26 @@ def process_and_aggregate(_df, column_map):
     df_30_days = df_merged[df_merged['date'] <= (df_merged['first_sale_date'] + pd.Timedelta(days=30))].copy()
 
     agg_logic = {'Qty': 'sum', 'Price': 'mean'}
-    # Динамически добавляем агрегацию для категориальных признаков
-    for cat_col in column_map['categorical_features']:
+    for cat_col in cat_features:
         agg_logic[cat_col] = 'first'
     
     df_agg = df_30_days.groupby(['Art', 'Magazin'], as_index=False).agg(agg_logic)
     df_agg.rename(columns={'Qty': 'Qty_30_days'}, inplace=True)
     
     stats = {
-        "total_rows": initial_rows, 
-        "final_rows": len(df_agg), 
-        "bad_date_rows": bad_date_rows
+        "total_rows": initial_rows, "final_rows": len(df_agg), "bad_date_rows": bad_date_rows
     }
     return df_agg, stats
 
 @st.cache_resource
-def train_model_with_optuna(_df_agg, cat_features):
+def train_model_with_optuna(_df_agg, cat_features_tuple):
+    cat_features = list(cat_features_tuple) # Превращаем кортеж обратно в список
     target = 'Qty_30_days'
-    # 'Art' никогда не используется как признак
     features = ['Magazin', 'Price'] + cat_features
     df_processed = _df_agg[features + [target]]
     
-    for col in cat_features + ['Magazin']:
+    all_cat_features = ['Magazin'] + cat_features
+    for col in all_cat_features:
         df_processed[col] = df_processed[col].astype(str)
 
     X, y = df_processed[features], df_processed[target]
@@ -90,10 +91,10 @@ def train_model_with_optuna(_df_agg, cat_features):
         study.optimize(lambda trial: mean_absolute_error(y_test, CatBoostRegressor(
             iterations=1000, learning_rate=trial.suggest_float('learning_rate', 0.01, 0.3),
             depth=trial.suggest_int('depth', 4, 10), verbose=0, random_seed=42
-        ).fit(X_train, y_train, cat_features=cat_features + ['Magazin'], eval_set=(X_test, y_test), early_stopping_rounds=50, use_best_model=True).predict(X_test)), n_trials=30)
+        ).fit(X_train, y_train, cat_features=all_cat_features, eval_set=(X_test, y_test), early_stopping_rounds=50, use_best_model=True).predict(X_test)), n_trials=30)
     
     st.success(f"Волшебство сработало! 💫 Лучшие параметры: {study.best_params}")
-    final_model = CatBoostRegressor(**study.best_params, iterations=1500, verbose=0, random_seed=42).fit(X, y, cat_features=cat_features + ['Magazin'])
+    final_model = CatBoostRegressor(**study.best_params, iterations=1500, verbose=0, random_seed=42).fit(X, y, cat_features=all_cat_features)
     test_preds = final_model.predict(X_test)
     return final_model, features, {'MAE': mean_absolute_error(y_test, test_preds), 'R2': r2_score(y_test, test_preds)}
 
@@ -123,12 +124,12 @@ if dataset_file:
     with st.form("mapping_form"):
         col1, col2 = st.columns(2)
         with col1:
-            art_col = st.selectbox("Артикул товара (ID)", all_columns, index=0)
-            magazin_col = st.selectbox("Название магазина", all_columns, index=1)
-            date_col = st.selectbox("Дата продажи", all_columns, index=2)
+            art_col = st.selectbox("Артикул товара (ID)", all_columns, index=min(0, len(all_columns)-1))
+            magazin_col = st.selectbox("Название магазина", all_columns, index=min(1, len(all_columns)-1))
+            date_col = st.selectbox("Дата продажи", all_columns, index=min(2, len(all_columns)-1))
         with col2:
-            qty_col = st.selectbox("Количество проданного товара (шт.)", all_columns, index=3)
-            price_col = st.selectbox("Цена товара", all_columns, index=4)
+            qty_col = st.selectbox("Количество проданного товара (шт.)", all_columns, index=min(3, len(all_columns)-1))
+            price_col = st.selectbox("Цена товара", all_columns, index=min(4, len(all_columns)-1))
         
         available_features = [c for c in all_columns if c not in [art_col, magazin_col, date_col, qty_col, price_col]]
         cat_features_selected = st.multiselect(
@@ -140,14 +141,14 @@ if dataset_file:
         submitted_mapping = st.form_submit_button("Обработать данные и обучить модель 🚀")
 
     if submitted_mapping:
-        column_map = {
-            'Art': art_col, 'Magazin': magazin_col, 'date': date_col,
-            'Qty': qty_col, 'Price': price_col,
-            'categorical_features': cat_features_selected
-        }
-        st.session_state.column_map = column_map
+        # Превращаем список в кортеж для кэширования
+        cat_features_tuple = tuple(cat_features_selected)
         
-        df_agg, stats = process_and_aggregate(st.session_state.df_raw, column_map)
+        df_agg, stats = process_and_aggregate(
+            st.session_state.df_raw, 
+            art_col, magazin_col, date_col, qty_col, price_col, 
+            cat_features_tuple
+        )
         
         with st.expander("📊 Смотрим на твои данные...", expanded=True):
             st.metric("Строк в файле 💅", f"{stats['total_rows']}")
@@ -155,8 +156,9 @@ if dataset_file:
             st.metric("Строк с плохой датой 🗑️", f"{stats['bad_date_rows']}")
         
         st.session_state.df_agg = df_agg
+        st.session_state.cat_features_selected = cat_features_selected # Сохраняем как список для UI
         
-        model, features, metrics = train_model_with_optuna(df_agg, cat_features_selected)
+        model, features, metrics = train_model_with_optuna(df_agg, cat_features_tuple)
         st.session_state.model = model
         st.session_state.features = features
         st.session_state.metrics = metrics
@@ -175,10 +177,13 @@ if st.session_state.processed:
     with st.form("product_form"):
         new_product_data = {}
         # Динамически создаем поля для ввода
-        for feature in st.session_state.column_map['categorical_features']:
+        for feature in st.session_state.cat_features_selected:
             unique_vals = st.session_state.df_agg[feature].dropna().unique().tolist()
-            new_product_data[feature] = st.selectbox(f"{feature} ✨", unique_vals)
-        
+            if unique_vals:
+                new_product_data[feature] = st.selectbox(f"{feature} ✨", unique_vals)
+            else: # Если колонка пустая
+                new_product_data[feature] = st.text_input(f"{feature} ✨ (введите значение)")
+
         new_product_data['Price'] = st.number_input("Цена 💰", min_value=0.0, step=100.0, format="%.2f")
         
         submitted_prediction = st.form_submit_button("Найти лучшие бутики! 🚀")
