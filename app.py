@@ -6,77 +6,129 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
 import optuna
 
-# Отключаем логирование Optuna, чтобы не засорять консоль
+# Отключаем детальное логирование Optuna в консоли
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 st.set_page_config(page_title="Рекомендатор магазинов", layout="wide")
 
 st.title("🎯 Рекомендатор магазинов для нового товара")
 
-# Загрузка файла
-dataset_file = st.file_uploader("\U0001F4C2 Загрузите CSV-файл с данными о продажах", type=["xlsx"])
+# --- БЛОК ВСПОМОГАТЕЛЬНЫХ ФУНКЦИЙ ---
 
-# --- Логика обучения модели и подготовки данных ---
+def find_and_convert_date_column(df):
+    """
+    Автоматически находит и конвертирует колонку с датами.
+    Сначала ищет по популярным именам, затем пытается конвертировать object-колонки.
+    """
+    potential_date_cols = ['Datasales', 'datasales', 'date', 'Date', 'Дата', 'дата_продажи', 'timestamp']
+    
+    # Поиск по имени
+    for col_name in potential_date_cols:
+        if col_name in df.columns:
+            st.info(f"Найдена колонка с датой: '{col_name}'. Попытка конвертации...")
+            try:
+                # errors='coerce' превратит неудачные парсинги в NaT (Not a Time)
+                df[col_name] = pd.to_datetime(df[col_name], errors='coerce')
+                # Если после конвертации почти все значения валидны, считаем это успехом
+                if df[col_name].notna().sum() / len(df) > 0.8:
+                    return df, col_name
+            except Exception:
+                continue # Попробуем следующую
+
+    # Если по имени не нашли, ищем по содержимому
+    st.warning("Не найдено стандартное имя колонки с датой. Пытаюсь найти по содержимому...")
+    for col_name in df.select_dtypes(include=['object']).columns:
+        try:
+            converted_col = pd.to_datetime(df[col_name], errors='coerce')
+            # Если успешно конвертировано более 80% строк, считаем колонку датой
+            if converted_col.notna().sum() / len(df) > 0.8:
+                st.info(f"Автоматически определена колонка с датой: '{col_name}'.")
+                df[col_name] = converted_col
+                return df, col_name
+        except Exception:
+            continue
+            
+    return df, None
+
+def display_data_stats(df_raw, df_clean, date_col_name):
+    """Показывает детальную статистику по загруженному датасету."""
+    with st.expander("🔍 Статистика по загруженным данным", expanded=True):
+        initial_rows = len(df_raw)
+        clean_rows = len(df_clean)
+        dropped_rows = initial_rows - clean_rows
+        
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Строк в файле", f"{initial_rows}")
+        col2.metric("Строк после очистки", f"{clean_rows}", help="Удалены строки с пропусками в 'Qty', 'Art', 'Magazin' или дате.")
+        col3.metric("Удалено строк", f"{dropped_rows}")
+        
+        st.info(f"""
+        - **Уникальных товаров (Art):** {df_clean['Art'].nunique()}
+        - **Уникальных магазинов (Magazin):** {df_clean['Magazin'].nunique()}
+        - **Период данных:** с {df_clean[date_col_name].min().strftime('%d.%m.%Y')} по {df_clean[date_col_name].max().strftime('%d.%m.%Y')}
+        """)
+
 @st.cache_data
-def process_data_and_train(uploaded_file):
+def load_and_prepare_data(uploaded_file):
+    """Загружает, проверяет, очищает и агрегирует данные."""
     try:
-        df = pd.read_csv(uploaded_file, parse_dates=['Datasales'])
+        df_raw = pd.read_csv(uploaded_file)
     except Exception as e:
         st.error(f"Ошибка чтения файла: {e}")
-        return None, None, None, None, None
+        return None
 
-    # 1. ПРАВИЛЬНАЯ АГРЕГАЦИЯ ДАННЫХ
-    st.info("Шаг 1: Подготовка данных. Агрегируем продажи за первые 30 дней...")
+    # 1. АВТОМАТИЧЕСКИЙ ПОИСК И КОНВЕРТАЦИЯ ДАТЫ
+    df, date_col_name = find_and_convert_date_column(df_raw.copy())
+    if not date_col_name:
+        st.error("Не удалось найти и обработать колонку с датой в вашем файле. Пожалуйста, проверьте данные.")
+        return None
     
-    df = df.dropna(subset=['Qty', 'Art', 'Magazin'])
-    df = df.sort_values(by=['Art', 'Magazin', 'Datasales'])
-
-    # Находим дату первой продажи для каждой пары (Товар, Магазин)
-    first_sale_dates = df.groupby(['Art', 'Magazin'])['Datasales'].first().reset_index()
-    first_sale_dates.rename(columns={'Datasales': 'first_sale_date'}, inplace=True)
-
-    df = pd.merge(df, first_sale_dates, on=['Art', 'Magazin'])
+    # 2. ОЧИСТКА ДАННЫХ
+    crucial_cols = ['Qty', 'Art', 'Magazin', date_col_name]
+    df_clean = df.dropna(subset=crucial_cols).copy()
     
-    # Оставляем только продажи в течение 30 дней с первой продажи
-    df_30_days = df[df['Datasales'] <= (df['first_sale_date'] + pd.Timedelta(days=30))].copy()
+    # 3. ОТОБРАЖЕНИЕ СТАТИСТИКИ
+    display_data_stats(df_raw, df_clean, date_col_name)
 
-    # Агрегируем данные, чтобы получить одну строку на пару (Товар, Магазин)
+    # 4. АГРЕГАЦИЯ ДАННЫХ (ПРОДАЖИ ЗА ПЕРВЫЕ 30 ДНЕЙ)
+    st.info("Агрегирую продажи за первые 30 дней для каждого товара в каждом магазине...")
+    df_clean = df_clean.sort_values(by=['Art', 'Magazin', date_col_name])
+    first_sale_dates = df_clean.groupby(['Art', 'Magazin'])[date_col_name].first().reset_index()
+    first_sale_dates.rename(columns={date_col_name: 'first_sale_date'}, inplace=True)
+    
+    df_merged = pd.merge(df_clean, first_sale_dates, on=['Art', 'Magazin'])
+    df_30_days = df_merged[df_merged[date_col_name] <= (df_merged['first_sale_date'] + pd.Timedelta(days=30))].copy()
+
     agg_logic = {
-        'Qty': 'sum', 'Sum': 'sum', 'Price': 'mean',
-        'Model': 'first', 'brand': 'first', 'Segment': 'first',
-        'color': 'first', 'formaoprav': 'first', 'Sex': 'first',
-        'Metal-Plastic': 'first'
+        'Qty': 'sum', 'Sum': 'sum', 'Price': 'mean', 'Model': 'first',
+        'brand': 'first', 'Segment': 'first', 'color': 'first',
+        'formaoprav': 'first', 'Sex': 'first', 'Metal-Plastic': 'first'
     }
     df_agg = df_30_days.groupby(['Art', 'Magazin'], as_index=False).agg(agg_logic)
     df_agg.rename(columns={'Qty': 'Qty_30_days'}, inplace=True)
     
-    if df_agg.empty:
-        st.error("Не удалось сформировать агрегированные данные. Проверьте содержимое файла.")
-        return None, None, None, None, None
+    return df_agg
 
-    # 2. ОПРЕДЕЛЕНИЕ ПРИЗНАКОВ И ЦЕЛИ
+@st.cache_resource
+def train_model_with_optuna(_df_agg):
+    """Проводит подбор гиперпараметров и обучает финальную модель."""
     target = 'Qty_30_days'
-    # 'Art' и 'Model' убраны из признаков, так как это ID. 'Magazin' - ключевой признак!
     cat_features = ['Magazin', 'brand', 'Segment', 'color', 'formaoprav', 'Sex', 'Metal-Plastic']
-    # Убираем лишние колонки
     drop_cols = ['Sum', 'Art', 'Model'] 
     
-    # Очистка и подготовка
-    df_agg = df_agg.drop(columns=drop_cols, errors='ignore')
-    features = [col for col in df_agg.columns if col != target]
+    df_processed = _df_agg.drop(columns=drop_cols, errors='ignore')
+    features = [col for col in df_processed.columns if col != target]
     
-    # Убедимся, что все категориальные признаки имеют строковый тип
     for col in cat_features:
-        if col in df_agg.columns:
-            df_agg[col] = df_agg[col].astype(str)
+        if col in df_processed.columns:
+            df_processed[col] = df_processed[col].astype(str)
 
-    X = df_agg[features]
-    y = df_agg[target]
+    X = df_processed[features]
+    y = df_processed[target]
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
 
-    # 3. АВТОПОДБОР ПАРАМЕТРОВ с OPTUNA
-    st.info("Шаг 2: Автоподбор параметров модели с помощью Optuna...")
+    st.info("Запускаю автоподбор параметров модели с помощью Optuna...")
     
     def objective(trial):
         params = {
@@ -84,117 +136,77 @@ def process_data_and_train(uploaded_file):
             'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
             'depth': trial.suggest_int('depth', 4, 10),
             'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1e-3, 10.0, log=True),
-            'random_strength': trial.suggest_float('random_strength', 1e-3, 10.0, log=True),
-            'bagging_temperature': trial.suggest_float('bagging_temperature', 0.0, 1.0),
-            'border_count': trial.suggest_int('border_count', 32, 255),
-            'verbose': 0,
-            'random_seed': 42
+            'verbose': 0, 'random_seed': 42
         }
-        
         model = CatBoostRegressor(**params)
-        # Обучаем на тренировочной и валидируемся на тестовой
         model.fit(X_train, y_train, cat_features=cat_features, eval_set=(X_test, y_test), early_stopping_rounds=50, use_best_model=True)
-        preds = model.predict(X_test)
-        mae = mean_absolute_error(y_test, preds)
-        return mae
+        return mean_absolute_error(y_test, model.predict(X_test))
 
-    # Запускаем оптимизацию
     study = optuna.create_study(direction='minimize')
-    study.optimize(objective, n_trials=30) # 30 попыток для скорости, можно увеличить до 50-100
+    study.optimize(objective, n_trials=30, show_progress_bar=True)
     
     best_params = study.best_params
     st.success(f"Лучшие параметры найдены: {best_params}")
 
-    # 4. ОБУЧЕНИЕ ФИНАЛЬНОЙ МОДЕЛИ
-    st.info("Шаг 3: Обучение финальной модели на лучших параметрах...")
+    st.info("Обучаю финальную модель на всех данных...")
     final_model = CatBoostRegressor(**best_params, iterations=1500, verbose=0, random_seed=42)
-    final_model.fit(X, y, cat_features=cat_features) # Обучение на всех данных
+    final_model.fit(X, y, cat_features=cat_features)
 
-    # Оценка качества финальной модели на отложенной выборке
     test_preds = final_model.predict(X_test)
-    final_mae = mean_absolute_error(y_test, test_preds)
-    final_r2 = r2_score(y_test, test_preds)
+    metrics = {'MAE': mean_absolute_error(y_test, test_preds), 'R2': r2_score(y_test, test_preds)}
+    
+    return final_model, features, cat_features, metrics
 
-    metrics = {'MAE': final_mae, 'R2': final_r2}
+# --- ОСНОВНОЙ БЛОК STREAMLIT ---
 
-    return final_model, df_agg, features, cat_features, metrics
+dataset_file = st.file_uploader("\U0001F4C2 Загрузите CSV-файл с данными о продажах", type=["csv"])
 
-
-# --- Основной блок Streamlit ---
 if dataset_file:
-    # Запускаем весь процесс
-    model, df_agg, features, cat_features, metrics = process_data_and_train(dataset_file)
+    df_agg = load_and_prepare_data(dataset_file)
+    
+    if df_agg is not None and not df_agg.empty:
+        model, features, cat_features, metrics = train_model_with_optuna(df_agg)
 
-    if model:
-        st.header("📊 Оценка качества модели")
-        col1, col2 = st.columns(2)
-        col1.metric("Средняя абсолютная ошибка (MAE)", f"{metrics['MAE']:.2f} шт.")
-        col2.metric("Коэффициент детерминации (R²)", f"{metrics['R2']:.2%}")
-        st.caption("MAE показывает, на сколько штук в среднем ошибается прогноз. R² показывает, какую долю дисперсии данных объясняет модель.")
-
-        st.header("✍️ Введите характеристики нового товара")
-        with st.form("product_form"):
-            # Используем text_input для новых товаров, чтобы можно было вводить невиданные ранее значения
+        if model:
+            st.header("📊 Оценка качества модели")
             col1, col2 = st.columns(2)
-            with col1:
-                brand = st.text_input("Brand (бренд)", help="Например, Ray-Ban")
-                forma = st.text_input("Forma oprav (форма оправы)", help="Например, Авиатор")
-                sex = st.selectbox("Sex (пол)", df_agg['Sex'].unique())
-                price = st.number_input("Price (цена)", min_value=0.0, step=100.0, format="%.2f")
-            
-            with col2:
-                segment = st.selectbox("Segment (сегмент)", df_agg['Segment'].unique())
-                color = st.text_input("Color (цвет)", help="Например, Черный")
-                material = st.selectbox("Metal-Plastic (материал)", df_agg['Metal-Plastic'].unique())
-            
-            submitted = st.form_submit_button("🚀 Получить рекомендации")
+            col1.metric("Средняя абсолютная ошибка (MAE)", f"{metrics['MAE']:.2f} шт.")
+            col2.metric("Коэффициент детерминации (R²)", f"{metrics['R2']:.2%}")
+            st.caption("MAE показывает, на сколько штук в среднем ошибается прогноз за 30 дней. R² показывает, какую долю изменчивости данных объясняет модель.")
 
-        if submitted:
-            # Создаем DataFrame для предсказания
-            magaziny = df_agg['Magazin'].unique()
-            
-            # Собираем данные нового товара в словарь
-            new_product_data = {
-                'brand': brand,
-                'Segment': segment,
-                'color': color,
-                'formaoprav': forma,
-                'Sex': sex,
-                'Metal-Plastic': material,
-                'Price': price
-            }
+            st.header("✍️ Введите характеристики нового товара")
+            with st.form("product_form"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    brand = st.text_input("Brand (бренд)", help="Например, Ray-Ban")
+                    forma = st.text_input("Forma oprav (форма оправы)", help="Например, Авиатор")
+                    sex = st.selectbox("Sex (пол)", df_agg['Sex'].unique())
+                    price = st.number_input("Price (цена)", min_value=0.0, step=100.0, format="%.2f")
+                with col2:
+                    segment = st.selectbox("Segment (сегмент)", df_agg['Segment'].unique())
+                    color = st.text_input("Color (цвет)", help="Например, Черный")
+                    material = st.selectbox("Metal-Plastic (материал)", df_agg['Metal-Plastic'].unique())
+                
+                submitted = st.form_submit_button("🚀 Получить рекомендации")
 
-            # Создаем строки для каждого магазина
-            recs_list = []
-            for magazin in magaziny:
-                row = new_product_data.copy()
-                row['Magazin'] = magazin
-                recs_list.append(row)
-            
-            recs_df = pd.DataFrame(recs_list)
-            # Упорядочиваем колонки как в обучающей выборке
-            recs_df = recs_df[features]
+            if submitted:
+                magaziny = df_agg['Magazin'].unique()
+                new_product_data = {'brand': brand, 'Segment': segment, 'color': color, 'formaoprav': forma,
+                                    'Sex': sex, 'Metal-Plastic': material, 'Price': price}
+                
+                recs_list = [dict(item, Magazin=mag) for mag in magaziny for item in [new_product_data]]
+                recs_df = pd.DataFrame(recs_list)[features]
 
-            # Делаем предсказание
-            recs_df['Pred_Qty_30_days'] = model.predict(recs_df).round(0)
-            
-            # Рассчитываем относительный рейтинг
-            max_pred = recs_df['Pred_Qty_30_days'].max()
-            if max_pred > 0:
-                recs_df['Rating_%'] = (recs_df['Pred_Qty_30_days'] / max_pred * 100).round(0)
-            else:
-                recs_df['Rating_%'] = 0
+                recs_df['Pred_Qty_30_days'] = np.maximum(0, model.predict(recs_df).round(0))
+                
+                max_pred = recs_df['Pred_Qty_30_days'].max()
+                recs_df['Rating_%'] = (recs_df['Pred_Qty_30_days'] / max_pred * 100).round(0) if max_pred > 0 else 0
+                
+                top_magaziny = recs_df.sort_values(by='Pred_Qty_30_days', ascending=False).reset_index(drop=True)
 
-            top_magaziny = recs_df.sort_values(by='Pred_Qty_30_days', ascending=False).reset_index(drop=True)
-            
-            # Убираем отрицательные прогнозы, если они есть
-            top_magaziny['Pred_Qty_30_days'] = top_magaziny['Pred_Qty_30_days'].apply(lambda x: max(0, x))
-
-            st.subheader("\U0001F4C8 Рекомендованные магазины для нового товара")
-            st.table(top_magaziny[['Magazin', 'Pred_Qty_30_days', 'Rating_%']].rename(columns={
-                'Magazin': 'Магазин',
-                'Pred_Qty_30_days': 'Прогноз продаж (30 дней, шт.)',
-                'Rating_%': 'Рейтинг (%)'
-            }))
+                st.subheader("\U0001F4C8 Рекомендованные магазины для нового товара")
+                st.table(top_magaziny[['Magazin', 'Pred_Qty_30_days', 'Rating_%']].rename(columns={
+                    'Magazin': 'Магазин', 'Pred_Qty_30_days': 'Прогноз продаж (30 дней, шт.)', 'Rating_%': 'Рейтинг (%)'
+                }))
 else:
     st.info("Пожалуйста, загрузите CSV-файл с данными о продажах для начала работы.")
