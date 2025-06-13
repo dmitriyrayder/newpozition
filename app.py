@@ -138,13 +138,28 @@ def process_data_and_train(_df, column_map, feature_config):
         df_merged = pd.merge(df, first_sale_dates, on=['Art', 'Magazin'])
         df_30_days = df_merged[df_merged['date'] <= (df_merged['first_sale_date'] + pd.Timedelta(days=30))].copy()
 
-        agg_logic = {'Qty': 'sum', 'Price': 'mean'}
+        # ### ИЗМЕНЕНИЕ ЗДЕСЬ ###
+        # Проблемный блок заменен на более надежный подход из двух шагов.
+
+        # Шаг 1: Агрегируем числовые значения
+        df_agg_numeric = df_30_days.groupby(['Art', 'Magazin'], as_index=False).agg(
+            Qty_30_days=('Qty', 'sum'),
+            Price=('Price', 'mean')
+        )
+
+        # Шаг 2: Получаем первые значения для категориальных признаков
+        grouping_keys = ['Art', 'Magazin']
         feature_cols = [col for col in all_features_df.columns if col in df_30_days.columns]
-        for col in feature_cols:
-            agg_logic[col] = 'first'
         
-        df_agg = df_30_days.groupby(['Art', 'Magazin'], as_index=False).agg(agg_logic)
-        df_agg.rename(columns={'Qty': 'Qty_30_days'}, inplace=True)
+        if feature_cols:
+            # Выбираем только нужные колонки и удаляем дубликаты, оставляя первую запись (данные отсортированы по дате)
+            df_agg_features = df_30_days[grouping_keys + feature_cols].drop_duplicates(subset=grouping_keys, keep='first')
+            # Шаг 3: Объединяем результаты
+            df_agg = pd.merge(df_agg_numeric, df_agg_features, on=grouping_keys, how='left')
+        else:
+            # Если дополнительных признаков нет, просто используем результат числовой агрегации
+            df_agg = df_agg_numeric
+        # ### КОНЕЦ ИЗМЕНЕНИЯ ###
 
         if len(df_agg) < 10:
             return None, None, None, None, f"Слишком мало агрегированных данных для обучения: {len(df_agg)} записей. Нужно минимум 10."
@@ -191,7 +206,6 @@ def process_data_and_train(_df, column_map, feature_config):
     except Exception as e:
         error_details = traceback.format_exc()
         return None, None, None, None, f"Критическая ошибка обработки данных: {str(e)}\n\nДетали:\n{error_details}"
-
 # ==============================================================================
 # ОСНОВНОЙ КОД ПРИЛОЖЕНИЯ
 # ==============================================================================
