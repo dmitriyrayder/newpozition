@@ -33,7 +33,8 @@ def create_synthetic_features(df, feature_configs):
         'gender': ['Мужские', 'Женские', 'Унисекс'],
         'material': ['Металл', 'Пластик', 'Дерево', 'Комбинированный'],
         'shape': ['Авиатор', 'Вайфарер', 'Круглые', 'Прямоугольные', 'Кошачий глаз', 'Спортивные'],
-        'brand': ['Ray-Ban', 'Oakley', 'Gucci', 'Prada', 'Другой']
+        'brand': ['Ray-Ban', 'Oakley', 'Gucci', 'Prada', 'Другой'],
+        'segment': ['Эконом', 'Средний', 'Премиум', 'Люкс']
     }
     
     for feature, config in feature_configs.items():
@@ -48,7 +49,7 @@ class RecommendationEngine:
     def __init__(self, df, new_features, feature_weights=None):
         self.df = df
         self.new_features = new_features
-        self.weights = feature_weights or {'price': 0.30, 'gender': 0.25, 'material': 0.25, 'shape': 0.20}
+        self.weights = feature_weights or {'price': 0.25, 'gender': 0.20, 'material': 0.20, 'shape': 0.20, 'segment': 0.15}
         self.stores = df['store'].unique()
     
     def calculate_compatibility(self, store_data):
@@ -64,14 +65,18 @@ class RecommendationEngine:
             scores['price'] = 0.5
         
         # Совместимость по категориальным признакам
-        for feature in ['gender', 'material', 'shape', 'brand']:
+        for feature in ['gender', 'material', 'shape', 'brand', 'segment']:
             if feature in self.new_features and feature in store_data.columns:
-                feature_counts = store_data[feature].value_counts()
-                if self.new_features[feature] in feature_counts.index:
-                    share = feature_counts[self.new_features[feature]] / len(store_data)
-                    scores[feature] = min(1.0, share * 2)
+                # Если выбрано "Учитывать все", ставим высокую совместимость
+                if self.new_features[feature] == "Учитывать все":
+                    scores[feature] = 0.9
                 else:
-                    scores[feature] = 0.3
+                    feature_counts = store_data[feature].value_counts()
+                    if self.new_features[feature] in feature_counts.index:
+                        share = feature_counts[self.new_features[feature]] / len(store_data)
+                        scores[feature] = min(1.0, share * 2)
+                    else:
+                        scores[feature] = 0.3
             else:
                 scores[feature] = 0.5
         
@@ -93,9 +98,12 @@ class RecommendationEngine:
         ]
         
         # Фильтр по категориальным признакам
-        for feature in ['gender', 'material', 'shape', 'brand']:
+        for feature in ['gender', 'material', 'shape', 'brand', 'segment']:
             if feature in self.new_features and feature in similar_items.columns:
-                if feature == 'gender' and self.new_features[feature] == 'Унисекс':
+                # Если выбрано "Учитывать все", не фильтруем по этому признаку
+                if self.new_features[feature] == "Учитывать все":
+                    continue
+                elif feature == 'gender' and self.new_features[feature] == 'Унисекс':
                     # Для унисекс включаем все категории
                     continue
                 elif feature == 'gender':
@@ -175,6 +183,7 @@ def display_model_profile(new_features):
         st.markdown(f"**🕶️ Форма:** {new_features['shape']}")
     with col3:
         st.markdown(f"**🏷️ Бренд:** {new_features['brand']}")
+        st.markdown(f"**💎 Сегмент:** {new_features['segment']}")
     
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -221,7 +230,7 @@ def display_recommendations(recommendations, new_features):
             # Критерии совместимости с профилем
             st.markdown("**🎯 Соответствие профилю модели:**")
             criteria_map = {'price': '💰 Цена', 'gender': '👤 Пол', 'material': '🔧 Материал', 
-                          'shape': '🕶️ Форма', 'brand': '🏷️ Бренд'}
+                          'shape': '🕶️ Форма', 'brand': '🏷️ Бренд', 'segment': '💎 Сегмент'}
             
             compatibility_data = []
             for criterion, score in rec['scores'].items():
@@ -312,6 +321,11 @@ if uploaded_file:
             col_price: 'price', col_qty: 'quantity'
         })
         
+        # Проверка наличия колонки store
+        if 'store' not in analysis_df.columns:
+            st.error("Не удалось найти колонку с магазинами. Проверьте настройки колонок.")
+            st.stop()
+        
         # Настройка признаков
         st.subheader("🎨 Характеристики товара")
         col1, col2 = st.columns(2)
@@ -320,12 +334,19 @@ if uploaded_file:
         with col1:
             feature_configs['gender'] = {'source': st.radio("👤 Пол:", ["Ввести вручную для новой модели", "Выбрать колонку", "Не использовать"])}
             feature_configs['material'] = {'source': st.radio("🔧 Материал:", ["Ввести вручную для новой модели", "Выбрать колонку", "Не использовать"])}
+            feature_configs['segment'] = {'source': st.radio("💎 Сегмент:", ["Ввести вручную для новой модели", "Выбрать колонку", "Не использовать"])}
         with col2:
             feature_configs['shape'] = {'source': st.radio("🕶️ Форма:", ["Ввести вручную для новой модели", "Выбрать колонку", "Не использовать"])}
             feature_configs['brand'] = {'source': st.radio("🏷️ Бренд:", ["Ввести вручную для новой модели", "Выбрать колонку", "Не использовать"])}
         
         # Создание признаков
         analysis_df = create_synthetic_features(analysis_df, feature_configs)
+        
+        # Получение уникальных значений из данных для выпадающих списков
+        unique_values = {}
+        for feature in ['gender', 'material', 'shape', 'brand', 'segment']:
+            if feature in analysis_df.columns:
+                unique_values[feature] = sorted(analysis_df[feature].dropna().unique().tolist())
         
         # Ввод новой модели
         st.subheader("🆕 Введите характеристики новой модели")
@@ -334,11 +355,25 @@ if uploaded_file:
         new_features = {}
         with col1:
             new_features['price'] = st.number_input("💰 Цена:", min_value=0, step=100, value=5000)
-            new_features['gender'] = st.selectbox("👤 Пол:", ["Мужские", "Женские", "Унисекс"])
-            new_features['material'] = st.selectbox("🔧 Материал:", ["Металл", "Пластик", "Дерево", "Комбинированный"])
+            
+            # Пол с опцией "Учитывать все"
+            gender_options = ["Учитывать все"] + unique_values.get('gender', ["Мужские", "Женские", "Унисекс"])
+            new_features['gender'] = st.selectbox("👤 Пол:", gender_options)
+            
+            # Материал с опцией "Учитывать все"
+            material_options = ["Учитывать все"] + unique_values.get('material', ["Металл", "Пластик", "Дерево", "Комбинированный"])
+            new_features['material'] = st.selectbox("🔧 Материал:", material_options)
+            
         with col2:
-            new_features['shape'] = st.selectbox("🕶️ Форма:", ["Авиатор", "Вайфарер", "Круглые", "Прямоугольные", "Кошачий глаз", "Спортивные"])
-            new_features['brand'] = st.selectbox("🏷️ Бренд:", ["Ray-Ban", "Oakley", "Gucci", "Prada", "Другой"])
+            # Форма с опцией "Учитывать все"
+            shape_options = ["Учитывать все"] + unique_values.get('shape', ["Авиатор", "Вайфарер", "Круглые", "Прямоугольные", "Кошачий глаз", "Спортивные"])
+            new_features['shape'] = st.selectbox("🕶️ Форма:", shape_options)
+            
+            new_features['brand'] = st.selectbox("🏷️ Бренд:", unique_values.get('brand', ["Ray-Ban", "Oakley", "Gucci", "Prada", "Другой"]))
+            
+            # Сегмент с опцией "Учитывать все"
+            segment_options = ["Учитывать все"] + unique_values.get('segment', ["Эконом", "Средний", "Премиум", "Люкс"])
+            new_features['segment'] = st.selectbox("💎 Сегмент:", segment_options)
         
         # Генерация рекомендаций
         if st.button("🎯 ПОДОБРАТЬ МАГАЗИНЫ", type="primary"):
