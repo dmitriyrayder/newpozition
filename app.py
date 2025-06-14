@@ -477,39 +477,170 @@ if uploaded_file is not None:
                             st.warning(f"Не удалось загрузить значения для колонки '{additional_feature_3}'")
             else:
                 st.info("Все доступные колонки уже используются в основных характеристиках.")
-        
-        # Система рекомендаций
+# Система рекомендаций
         if st.button("🎯 ПОДОБРАТЬ МАГАЗИНЫ", type="primary"):
             with st.spinner("Анализ данных и создание рекомендаций..."):
                 
-                # Создание синтетических данных для демонстрации
+                # Создание расширенных данных для анализа
                 stores = analysis_df['store'].unique()
                 recommendations = []
                 
-                # Простая логика рекомендаций на основе профилей магазинов
+                # Функция для расчета совместимости по признакам
+                def calculate_feature_compatibility(store_data, new_features):
+                    """Расчет совместимости по всем признакам товара"""
+                    compatibility_scores = {}
+                    
+                    # Совместимость по цене (30% веса)
+                    if not store_data.empty and 'price' in store_data.columns:
+                        avg_store_price = store_data['price'].mean()
+                        price_diff = abs(new_features['price'] - avg_store_price) / avg_store_price
+                        compatibility_scores['price'] = max(0.2, 1 - min(price_diff, 1.0))
+                    else:
+                        compatibility_scores['price'] = 0.5
+                    
+                    # Совместимость по полу (25% веса)
+                    gender_compatibility = 0.5  # базовое значение
+                    if 'gender' in store_data.columns:
+                        gender_counts = store_data['gender'].value_counts()
+                        if new_features['gender'] in gender_counts.index:
+                            # Доля товаров нужного пола в магазине
+                            gender_share = gender_counts[new_features['gender']] / len(store_data)
+                            gender_compatibility = min(1.0, gender_share * 2)  # усиливаем значимость
+                        elif 'Унисекс' in gender_counts.index:
+                            gender_compatibility = 0.7  # унисекс подходит для всех
+                    compatibility_scores['gender'] = gender_compatibility
+                    
+                    # Совместимость по материалу (25% веса)
+                    material_compatibility = 0.5
+                    if 'material' in store_data.columns:
+                        material_counts = store_data['material'].value_counts()
+                        if new_features['material'] in material_counts.index:
+                            material_share = material_counts[new_features['material']] / len(store_data)
+                            material_compatibility = min(1.0, material_share * 1.5)
+                    compatibility_scores['material'] = material_compatibility
+                    
+                    # Совместимость по форме (20% веса)
+                    shape_compatibility = 0.5
+                    if 'shape' in store_data.columns:
+                        shape_counts = store_data['shape'].value_counts()
+                        if new_features['shape'] in shape_counts.index:
+                            shape_share = shape_counts[new_features['shape']] / len(store_data)
+                            shape_compatibility = min(1.0, shape_share * 1.5)
+                    compatibility_scores['shape'] = shape_compatibility
+                    
+                    return compatibility_scores
+                
+                # Функция для расчета прогноза продаж по сегменту
+                def calculate_segment_forecast(store_data, new_features, compatibility_scores):
+                    """Расчет прогноза продаж на основе сегментного анализа"""
+                    
+                    # Базовые продажи магазина
+                    base_monthly_sales = store_data['quantity'].sum() if not store_data.empty else 10
+                    
+                    # Фильтрация по похожим товарам (сегментация)
+                    similar_items = store_data.copy()
+                    
+                    # Фильтр по цене (±30% от новой цены)
+                    price_range = new_features['price'] * 0.3
+                    similar_items = similar_items[
+                        (similar_items['price'] >= new_features['price'] - price_range) &
+                        (similar_items['price'] <= new_features['price'] + price_range)
+                    ]
+                    
+                    # Фильтр по полу (если есть данные)
+                    if 'gender' in similar_items.columns:
+                        similar_items = similar_items[
+                            (similar_items['gender'] == new_features['gender']) |
+                            (similar_items['gender'] == 'Унисекс')
+                        ]
+                    
+                    # Фильтр по материалу (если есть данные)
+                    if 'material' in similar_items.columns:
+                        similar_items = similar_items[
+                            similar_items['material'] == new_features['material']
+                        ]
+                    
+                    # Расчет прогноза на основе сегмента
+                    if not similar_items.empty:
+                        # Средние продажи похожих товаров
+                        segment_avg_sales = similar_items['quantity'].mean()
+                        segment_count = len(similar_items['article'].unique())
+                        
+                        # Корректировка на размер сегмента
+                        segment_multiplier = min(2.0, segment_count / 5)  # чем больше сегмент, тем лучше
+                        
+                        # Прогноз = средние продажи сегмента * мультипликатор * совместимость
+                        predicted_sales = segment_avg_sales * segment_multiplier
+                    else:
+                        # Если нет похожих товаров, используем общие продажи магазина
+                        unique_articles = store_data['article'].nunique() if not store_data.empty else 1
+                        predicted_sales = base_monthly_sales / max(1, unique_articles)
+                    
+                    # Применяем коэффициент общей совместимости
+                    overall_compatibility = (
+                        compatibility_scores['price'] * 0.30 +
+                        compatibility_scores['gender'] * 0.25 +
+                        compatibility_scores['material'] * 0.25 +
+                        compatibility_scores['shape'] * 0.20
+                    )
+                    
+                    final_forecast = predicted_sales * overall_compatibility
+                    
+                    # Минимальный прогноз - 5 штук в месяц для активного магазина
+                    return max(5, final_forecast)
+                
+                # Подготовка данных о новом товаре
+                new_features = {
+                    'price': new_price,
+                    'gender': new_gender,
+                    'material': new_material,
+                    'shape': new_shape
+                }
+                
+                # Добавляем признаки в датасет для анализа (если они не выбраны из колонок)
+                if gender_source == "Ввести вручную для новой модели" and 'gender' not in analysis_df.columns:
+                    # Создаем синтетические данные для демонстрации
+                    np.random.seed(42)
+                    genders = ['Мужские', 'Женские', 'Унисекс']
+                    analysis_df['gender'] = np.random.choice(genders, size=len(analysis_df))
+                
+                if material_source == "Ввести вручную для новой модели" and 'material' not in analysis_df.columns:
+                    materials = ['Металл', 'Пластик', 'Дерево', 'Комбинированный']
+                    analysis_df['material'] = np.random.choice(materials, size=len(analysis_df))
+                
+                if shape_source == "Ввести вручную для новой модели" and 'shape' not in analysis_df.columns:
+                    shapes = ['Авиатор', 'Вайфарер', 'Круглые', 'Прямоугольные', 'Кошачий глаз', 'Спортивные']
+                    analysis_df['shape'] = np.random.choice(shapes, size=len(analysis_df))
+                
+                # Расчет рекомендаций для каждого магазина
                 for store in stores:
                     store_data = analysis_df[analysis_df['store'] == store]
                     
-                    # Базовый прогноз на основе средних продаж
-                    base_sales = store_data['quantity'].mean()
+                    # Расчет совместимости по всем признакам
+                    compatibility_scores = calculate_feature_compatibility(store_data, new_features)
                     
-                    # Коэффициенты совместимости (упрощенная логика)
-                    price_compatibility = 1.0
-                    if not store_data.empty:
-                        avg_store_price = store_data['price'].mean()
-                        price_diff = abs(new_price - avg_store_price) / avg_store_price
-                        price_compatibility = max(0.3, 1 - price_diff)
+                    # Расчет прогноза продаж
+                    predicted_sales = calculate_segment_forecast(store_data, new_features, compatibility_scores)
                     
-                    # Финальный прогноз
-                    predicted_sales = base_sales * price_compatibility * np.random.uniform(0.7, 1.3)
-                    compatibility_score = price_compatibility * np.random.uniform(0.6, 1.0)
+                    # Общая совместимость
+                    overall_compatibility = (
+                        compatibility_scores['price'] * 0.30 +
+                        compatibility_scores['gender'] * 0.25 +
+                        compatibility_scores['material'] * 0.25 +
+                        compatibility_scores['shape'] * 0.20
+                    )
                     
                     recommendations.append({
                         'store': store,
-                        'predicted_sales': max(1, predicted_sales),
-                        'compatibility': compatibility_score,
+                        'predicted_sales': predicted_sales,
+                        'compatibility': overall_compatibility,
+                        'price_compatibility': compatibility_scores['price'],
+                        'gender_compatibility': compatibility_scores['gender'],
+                        'material_compatibility': compatibility_scores['material'],
+                        'shape_compatibility': compatibility_scores['shape'],
                         'avg_price': store_data['price'].mean() if not store_data.empty else new_price,
-                        'total_items': len(store_data)
+                        'total_items': len(store_data),
+                        'unique_articles': store_data['article'].nunique() if not store_data.empty else 0
                     })
                 
                 # Сортировка по прогнозу продаж
@@ -522,32 +653,82 @@ if uploaded_file is not None:
                 top_recommendations = recommendations[:min(10, len(recommendations))]
                 
                 for i, rec in enumerate(top_recommendations):
-                    with st.expander(f"#{i+1} {rec['store']} - Прогноз: {rec['predicted_sales']:.0f} шт/месяц"):
-                        col1, col2, col3 = st.columns(3)
+                    # Определяем статус рекомендации
+                    if rec['compatibility'] >= 0.8:
+                        status = "🟢 Отлично"
+                        status_color = "success"
+                    elif rec['compatibility'] >= 0.6:
+                        status = "🟡 Хорошо"
+                        status_color = "warning"
+                    else:
+                        status = "🔴 Удовлетворительно"
+                        status_color = "error"
+                    
+                    with st.expander(f"#{i+1} {rec['store']} - {status} - Прогноз: {rec['predicted_sales']:.0f} шт/месяц"):
+                        # Основные метрики
+                        col1, col2, col3, col4 = st.columns(4)
                         
                         with col1:
-                            st.metric("📈 Прогноз продаж", f"{rec['predicted_sales']:.0f} шт")
+                            st.metric("📈 Прогноз продаж", f"{rec['predicted_sales']:.0f} шт/мес")
                         with col2:
-                            st.metric("🎯 Совместимость", f"{rec['compatibility']:.1%}")
+                            st.metric("🎯 Общая совместимость", f"{rec['compatibility']:.1%}")
                         with col3:
-                            st.metric("💰 Средняя цена в магазине", f"{rec['avg_price']:.0f} ₽")
+                            st.metric("💰 Средняя цена", f"{rec['avg_price']:.0f} ₽")
+                        with col4:
+                            st.metric("📦 Уникальных товаров", f"{rec['unique_articles']}")
                         
-                        # Дополнительная информация
-                        st.write(f"**Всего позиций в магазине:** {rec['total_items']}")
+                        # Детализация совместимости
+                        st.write("**Детализация совместимости:**")
+                        compatibility_details = pd.DataFrame({
+                            'Критерий': ['💰 Цена (30%)', '👤 Пол (25%)', '🔧 Материал (25%)', '🕶️ Форма (20%)'],
+                            'Совместимость': [
+                                f"{rec['price_compatibility']:.1%}",
+                                f"{rec['gender_compatibility']:.1%}",
+                                f"{rec['material_compatibility']:.1%}",
+                                f"{rec['shape_compatibility']:.1%}"
+                            ],
+                            'Оценка': [
+                                "Отлично" if rec['price_compatibility'] >= 0.8 else "Хорошо" if rec['price_compatibility'] >= 0.6 else "Удовлетворительно",
+                                "Отлично" if rec['gender_compatibility'] >= 0.8 else "Хорошо" if rec['gender_compatibility'] >= 0.6 else "Удовлетворительно",
+                                "Отлично" if rec['material_compatibility'] >= 0.8 else "Хорошо" if rec['material_compatibility'] >= 0.6 else "Удовлетворительно",
+                                "Отлично" if rec['shape_compatibility'] >= 0.8 else "Хорошо" if rec['shape_compatibility'] >= 0.6 else "Удовлетворительно"
+                            ]
+                        })
+                        st.dataframe(compatibility_details, use_container_width=True, hide_index=True)
                         
                         # Причины рекомендации
                         reasons = []
-                        if rec['compatibility'] > 0.8:
-                            reasons.append("✅ Высокая совместимость по цене")
-                        if rec['total_items'] > 50:
-                            reasons.append("✅ Большой ассортимент")
+                        if rec['price_compatibility'] > 0.8:
+                            reasons.append("✅ Отличная совместимость по цене")
+                        if rec['gender_compatibility'] > 0.8:
+                            reasons.append("✅ Высокий спрос на выбранный пол товара")
+                        if rec['material_compatibility'] > 0.8:
+                            reasons.append("✅ Популярный материал в магазине")
+                        if rec['shape_compatibility'] > 0.8:
+                            reasons.append("✅ Востребованная форма оправы")
+                        if rec['unique_articles'] > 50:
+                            reasons.append("✅ Большой ассортимент товаров")
                         if rec['predicted_sales'] > np.mean([r['predicted_sales'] for r in recommendations]):
-                            reasons.append("✅ Выше среднего прогноза")
+                            reasons.append("✅ Прогноз выше среднего по сети")
                         
                         if reasons:
-                            st.write("**Причины рекомендации:**")
+                            st.write("**Преимущества размещения:**")
                             for reason in reasons:
                                 st.write(reason)
+                        
+                        # Рекомендации по улучшению
+                        improvements = []
+                        if rec['price_compatibility'] < 0.6:
+                            improvements.append("💡 Рассмотрите корректировку цены под ценовой сегмент магазина")
+                        if rec['gender_compatibility'] < 0.6:
+                            improvements.append("💡 Возможно, стоит рассмотреть унисекс вариант")
+                        if rec['material_compatibility'] < 0.6:
+                            improvements.append("💡 Материал может быть не популярен в данном магазине")
+                        
+                        if improvements:
+                            st.write("**Рекомендации по оптимизации:**")
+                            for improvement in improvements:
+                                st.write(improvement)
                 
                 # Антирекомендации
                 if len(recommendations) > 5:
@@ -555,35 +736,101 @@ if uploaded_file is not None:
                     worst_recommendations = recommendations[-3:]
                     
                     for rec in worst_recommendations:
-                        st.warning(f"**{rec['store']}** - Низкий прогноз: {rec['predicted_sales']:.0f} шт/месяц (совместимость: {rec['compatibility']:.1%})")
+                        st.error(f"**{rec['store']}** - Низкий прогноз: {rec['predicted_sales']:.0f} шт/месяц "
+                               f"(совместимость: {rec['compatibility']:.1%})")
+                        
+                        # Основные проблемы
+                        problems = []
+                        if rec['price_compatibility'] < 0.4:
+                            problems.append("🔴 Несовместимость по цене")
+                        if rec['gender_compatibility'] < 0.4:
+                            problems.append("🔴 Низкий спрос на данный пол товара")
+                        if rec['material_compatibility'] < 0.4:
+                            problems.append("🔴 Непопулярный материал")
+                        if rec['shape_compatibility'] < 0.4:
+                            problems.append("🔴 Невостребованная форма")
+                        
+                        if problems:
+                            st.write("Основные проблемы: " + ", ".join(problems))
                 
-                # Общая статистика
+                # Общая статистика прогноза
                 st.subheader("📊 Общая статистика прогноза")
                 
                 total_predicted = sum([r['predicted_sales'] for r in recommendations])
                 avg_compatibility = np.mean([r['compatibility'] for r in recommendations])
+                best_compatibility = max([r['compatibility'] for r in recommendations])
                 
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
-                    st.metric("Общий прогноз продаж", f"{total_predicted:.0f} шт/месяц")
+                    st.metric("Общий прогноз", f"{total_predicted:.0f} шт/месяц")
                 with col2:
                     st.metric("Средняя совместимость", f"{avg_compatibility:.1%}")
                 with col3:
-                    st.metric("Количество магазинов", len(recommendations))
+                    st.metric("Лучшая совместимость", f"{best_compatibility:.1%}")
+                with col4:
+                    st.metric("Магазинов проанализировано", len(recommendations))
+                
+                # Диаграмма совместимости
+                st.subheader("📈 Анализ совместимости по критериям")
+                
+                # Данные для радарной диаграммы топ-5 магазинов
+                top_5 = recommendations[:5]
+                criteria = ['Цена', 'Пол', 'Материал', 'Форма']
+                
+                fig = go.Figure()
+                
+                for i, rec in enumerate(top_5):
+                    values = [
+                        rec['price_compatibility'],
+                        rec['gender_compatibility'], 
+                        rec['material_compatibility'],
+                        rec['shape_compatibility']
+                    ]
+                    
+                    fig.add_trace(go.Scatterpolar(
+                        r=values,
+                        theta=criteria,
+                        fill='toself',
+                        name=f"{rec['store']} ({rec['predicted_sales']:.0f} шт)",
+                        opacity=0.6
+                    ))
+                
+                fig.update_layout(
+                    polar=dict(
+                        radialaxis=dict(
+                            visible=True,
+                            range=[0, 1]
+                        )),
+                    showlegend=True,
+                    title="Профили совместимости топ-5 магазинов"
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
                 
                 # График распределения прогнозов
                 rec_df = pd.DataFrame(recommendations)
-                fig = px.bar(rec_df.head(10), 
-                           x='store', 
-                           y='predicted_sales',
-                           color='compatibility',
-                           title="ТОП-10 магазинов по прогнозу продаж",
-                           labels={'predicted_sales': 'Прогноз продаж, шт/месяц',
-                                  'store': 'Магазин',
-                                  'compatibility': 'Совместимость'})
-                fig.update_xaxes(tickangle=45)
-                st.plotly_chart(fig, use_container_width=True)
+                fig2 = px.scatter(rec_df, 
+                               x='compatibility', 
+                               y='predicted_sales',
+                               size='unique_articles',
+                               hover_name='store',
+                               title="Карта магазинов: Совместимость vs Прогноз продаж",
+                               labels={
+                                   'compatibility': 'Общая совместимость',
+                                   'predicted_sales': 'Прогноз продаж, шт/месяц',
+                                   'unique_articles': 'Количество товаров'
+                               })
+                
+                # Добавляем линии разделения на зоны
+                fig2.add_hline(y=np.mean(rec_df['predicted_sales']), 
+                             line_dash="dash", 
+                             annotation_text="Средний прогноз")
+                fig2.add_vline(x=0.6, 
+                             line_dash="dash", 
+                             annotation_text="Мин. совместимость")
+                
+                st.plotly_chart(fig2, use_container_width=True)
     
     except Exception as e:
         st.error(f"❌ Ошибка при загрузке файла: {str(e)}")
