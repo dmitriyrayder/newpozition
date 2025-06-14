@@ -12,6 +12,7 @@ st.set_page_config(page_title="💖 Модный Советник по Прод�
 st.markdown("""<style>
 .main-header {font-size: 2.5rem; color: #e74c3c; text-align: center; margin-bottom: 2rem; font-weight: bold;}
 .metric-card {background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 1rem; border-radius: 10px; color: white; text-align: center; margin: 0.5rem 0;}
+.profile-card {background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); padding: 1rem; border-radius: 10px; color: white; margin-bottom: 1rem;}
 </style>""", unsafe_allow_html=True)
 
 st.markdown('<h1 class="main-header">💖 Модный Советник по Продажам</h1>', unsafe_allow_html=True)
@@ -76,34 +77,54 @@ class RecommendationEngine:
         
         return scores
     
-    def predict_sales(self, store_data, compatibility_scores):
-        """Прогноз продаж на основе сегментного анализа"""
+    def calculate_profile_sales(self, store_data):
+        """Расчет суммы продаж товаров с аналогичным профилем"""
         if store_data.empty:
-            return 10
+            return 0, 0
         
-        # Фильтрация похожих товаров
+        # Фильтрация товаров с похожим профилем
         similar_items = store_data.copy()
+        
+        # Фильтр по цене (±30% от целевой цены)
         price_range = self.new_features['price'] * 0.3
         similar_items = similar_items[
             (similar_items['price'] >= self.new_features['price'] - price_range) &
             (similar_items['price'] <= self.new_features['price'] + price_range)
         ]
         
-        # Фильтрация по признакам
-        for feature in ['gender', 'material', 'shape']:
+        # Фильтр по категориальным признакам
+        for feature in ['gender', 'material', 'shape', 'brand']:
             if feature in self.new_features and feature in similar_items.columns:
-                similar_items = similar_items[
-                    (similar_items[feature] == self.new_features[feature]) |
-                    (similar_items[feature] == 'Унисекс') if feature == 'gender' else
-                    (similar_items[feature] == self.new_features[feature])
-                ]
+                if feature == 'gender' and self.new_features[feature] == 'Унисекс':
+                    # Для унисекс включаем все категории
+                    continue
+                elif feature == 'gender':
+                    # Для мужских/женских включаем также унисекс
+                    similar_items = similar_items[
+                        (similar_items[feature] == self.new_features[feature]) |
+                        (similar_items[feature] == 'Унисекс')
+                    ]
+                else:
+                    similar_items = similar_items[similar_items[feature] == self.new_features[feature]]
         
-        # Расчет прогноза
-        if not similar_items.empty:
-            segment_avg = similar_items['quantity'].mean()
-            segment_multiplier = min(2.0, len(similar_items['article'].unique()) / 5)
-            predicted = segment_avg * segment_multiplier
+        total_sales = similar_items['quantity'].sum() if not similar_items.empty else 0
+        unique_articles = similar_items['article'].nunique() if not similar_items.empty else 0
+        
+        return total_sales, unique_articles
+    
+    def predict_sales(self, store_data, compatibility_scores):
+        """Прогноз продаж на основе сегментного анализа"""
+        if store_data.empty:
+            return 10
+        
+        # Используем данные о похожих товарах
+        profile_sales, profile_articles = self.calculate_profile_sales(store_data)
+        
+        if profile_sales > 0 and profile_articles > 0:
+            # Если есть данные о похожих товарах, используем их
+            predicted = profile_sales / profile_articles
         else:
+            # Иначе используем общую статистику магазина
             unique_articles = store_data['article'].nunique()
             predicted = store_data['quantity'].sum() / max(1, unique_articles)
         
@@ -121,6 +142,7 @@ class RecommendationEngine:
             store_data = self.df[self.df['store'] == store]
             compatibility_scores = self.calculate_compatibility(store_data)
             predicted_sales = self.predict_sales(store_data, compatibility_scores)
+            profile_sales, profile_articles = self.calculate_profile_sales(store_data)
             
             overall_compatibility = sum(compatibility_scores[k] * self.weights.get(k, 0) 
                                       for k in compatibility_scores.keys())
@@ -132,13 +154,35 @@ class RecommendationEngine:
                 'scores': compatibility_scores,
                 'avg_price': store_data['price'].mean() if not store_data.empty else self.new_features['price'],
                 'total_items': len(store_data),
-                'unique_articles': store_data['article'].nunique() if not store_data.empty else 0
+                'unique_articles': store_data['article'].nunique() if not store_data.empty else 0,
+                'profile_sales': profile_sales,
+                'profile_articles': profile_articles
             })
         
         return sorted(recommendations, key=lambda x: x['predicted_sales'], reverse=True)
 
+def display_model_profile(new_features):
+    """Отображение профиля новой модели"""
+    st.markdown('<div class="profile-card">', unsafe_allow_html=True)
+    st.markdown("### 🎯 Профиль новой модели")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"**💰 Цена:** {new_features['price']:,} ₽")
+        st.markdown(f"**👤 Пол:** {new_features['gender']}")
+    with col2:
+        st.markdown(f"**🔧 Материал:** {new_features['material']}")
+        st.markdown(f"**🕶️ Форма:** {new_features['shape']}")
+    with col3:
+        st.markdown(f"**🏷️ Бренд:** {new_features['brand']}")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+
 def display_recommendations(recommendations, new_features):
     """Отображение рекомендаций с оптимизированным интерфейсом"""
+    # Отображаем профиль модели
+    display_model_profile(new_features)
+    
     st.subheader("🏆 Рекомендуемые магазины")
     
     # Топ-10 рекомендаций
@@ -153,23 +197,42 @@ def display_recommendations(recommendations, new_features):
         else:
             status, color = "🔴 Удовлетворительно", "error"
         
-        with st.expander(f"#{i+1} {rec['store']} - {status} - Прогноз: {rec['predicted_sales']:.0f} шт/месяц"):
-            # Основные метрики
-            col1, col2, col3, col4 = st.columns(4)
+        # Заголовок с информацией о похожих товарах
+        profile_info = ""
+        if rec['profile_sales'] > 0:
+            profile_info = f" | Продажи похожих: {rec['profile_sales']:.0f} шт ({rec['profile_articles']} товаров)"
+        
+        with st.expander(f"#{i+1} {rec['store']} - {status} - Прогноз: {rec['predicted_sales']:.0f} шт/месяц{profile_info}"):
+            
+            # Основные метрики в две строки
+            col1, col2, col3, col4, col5 = st.columns(5)
             with col1: st.metric("📈 Прогноз продаж", f"{rec['predicted_sales']:.0f} шт/мес")
             with col2: st.metric("🎯 Совместимость", f"{rec['compatibility']:.1%}")
             with col3: st.metric("💰 Средняя цена", f"{rec['avg_price']:.0f} ₽")
-            with col4: st.metric("📦 Товаров", f"{rec['unique_articles']}")
+            with col4: st.metric("📦 Всего товаров", f"{rec['unique_articles']}")
+            with col5: st.metric("🎪 Похожие продажи", f"{rec['profile_sales']:.0f} шт")
             
-            # Детализация совместимости только по выбранным признакам
+            # Информация о профиле товаров
+            if rec['profile_sales'] > 0:
+                st.success(f"✅ В магазине уже продается {rec['profile_articles']} товаров с похожим профилем общим объемом {rec['profile_sales']:.0f} штук")
+            else:
+                st.warning("⚠️ В магазине нет товаров с точно таким профилем, прогноз основан на общей статистике")
+            
+            # Критерии совместимости с профилем
+            st.markdown("**🎯 Соответствие профилю модели:**")
             criteria_map = {'price': '💰 Цена', 'gender': '👤 Пол', 'material': '🔧 Материал', 
                           'shape': '🕶️ Форма', 'brand': '🏷️ Бренд'}
             
             compatibility_data = []
             for criterion, score in rec['scores'].items():
                 if criterion in new_features:  # Показываем только выбранные признаки
+                    profile_value = new_features[criterion]
+                    if criterion == 'price':
+                        profile_value = f"{profile_value:,} ₽"
+                    
                     compatibility_data.append({
                         'Критерий': criteria_map.get(criterion, criterion),
+                        'Значение профиля': profile_value,
                         'Совместимость': f"{score:.1%}",
                         'Оценка': "Отлично" if score >= 0.8 else "Хорошо" if score >= 0.6 else "Слабо"
                     })
@@ -177,28 +240,47 @@ def display_recommendations(recommendations, new_features):
             if compatibility_data:
                 st.dataframe(pd.DataFrame(compatibility_data), use_container_width=True, hide_index=True)
             
-            # Причины рекомендации на основе выбранных признаков
+            # Анализ причин рекомендации
             reasons = []
+            warnings = []
+            
             for criterion, score in rec['scores'].items():
-                if criterion in new_features and score > 0.7:
-                    if criterion == 'price':
-                        reasons.append("✅ Отличная совместимость по цене")
-                    elif criterion == 'gender':
-                        reasons.append(f"✅ Высокий спрос на {new_features['gender'].lower()} товары")
-                    elif criterion == 'material':
-                        reasons.append(f"✅ Популярный материал: {new_features['material']}")
-                    elif criterion == 'shape':
-                        reasons.append(f"✅ Востребованная форма: {new_features['shape']}")
-                    elif criterion == 'brand':
-                        reasons.append(f"✅ Известный бренд: {new_features['brand']}")
+                if criterion in new_features:
+                    if score > 0.7:
+                        if criterion == 'price':
+                            reasons.append("✅ Отличная совместимость по цене с ассортimentом магазина")
+                        elif criterion == 'gender':
+                            reasons.append(f"✅ Высокий спрос в магазине на {new_features['gender'].lower()} товары")
+                        elif criterion == 'material':
+                            reasons.append(f"✅ Популярный в магазине материал: {new_features['material']}")
+                        elif criterion == 'shape':
+                            reasons.append(f"✅ Востребованная в магазине форма: {new_features['shape']}")
+                        elif criterion == 'brand':
+                            reasons.append(f"✅ Успешно продающийся бренд: {new_features['brand']}")
+                    elif score < 0.5:
+                        if criterion == 'price':
+                            warnings.append("⚠️ Цена не соответствует ценовому сегменту магазина")
+                        elif criterion == 'gender':
+                            warnings.append(f"⚠️ Низкий спрос на {new_features['gender'].lower()} товары")
+                        elif criterion == 'material':
+                            warnings.append(f"⚠️ Материал {new_features['material']} редко покупают в этом магазине")
+                        elif criterion == 'shape':
+                            warnings.append(f"⚠️ Форма {new_features['shape']} не популярна в магазине")
+                        elif criterion == 'brand':
+                            warnings.append(f"⚠️ Бренд {new_features['brand']} слабо представлен в магазине")
             
             if rec['unique_articles'] > 50:
-                reasons.append("✅ Большой ассортимент")
+                reasons.append("✅ Большой и разнообразный ассортимент")
             
             if reasons:
-                st.write("**Преимущества:**")
-                for reason in reasons[:4]:  # Ограничиваем количество
+                st.write("**💪 Преимущества размещения:**")
+                for reason in reasons[:4]:
                     st.write(reason)
+            
+            if warnings:
+                st.write("**⚠️ Потенциальные риски:**")
+                for warning in warnings[:3]:
+                    st.write(warning)
 
 # Основной интерфейс
 with st.sidebar:
@@ -246,7 +328,7 @@ if uploaded_file:
         analysis_df = create_synthetic_features(analysis_df, feature_configs)
         
         # Ввод новой модели
-        st.subheader("🆕 Новая модель")
+        st.subheader("🆕 Введите характеристики новой модели")
         col1, col2 = st.columns(2)
         
         new_features = {}
@@ -260,20 +342,23 @@ if uploaded_file:
         
         # Генерация рекомендаций
         if st.button("🎯 ПОДОБРАТЬ МАГАЗИНЫ", type="primary"):
-            with st.spinner("Анализ данных..."):
+            with st.spinner("Анализ данных и поиск похожих товаров..."):
                 engine = RecommendationEngine(analysis_df, new_features)
                 recommendations = engine.generate_recommendations()
                 display_recommendations(recommendations, new_features)
                 
                 # Общая статистика
-                st.subheader("📊 Статистика")
+                st.subheader("📊 Общая статистика по всем магазинам")
                 total_predicted = sum(r['predicted_sales'] for r in recommendations)
                 avg_compatibility = np.mean([r['compatibility'] for r in recommendations])
+                total_profile_sales = sum(r['profile_sales'] for r in recommendations)
+                stores_with_profile = sum(1 for r in recommendations if r['profile_sales'] > 0)
                 
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 with col1: st.metric("Общий прогноз", f"{total_predicted:.0f} шт/месяц")
                 with col2: st.metric("Средняя совместимость", f"{avg_compatibility:.1%}")
-                with col3: st.metric("Магазинов", len(recommendations))
+                with col3: st.metric("Продажи похожих товаров", f"{total_profile_sales:.0f} шт")
+                with col4: st.metric("Магазинов с профилем", f"{stores_with_profile}/{len(recommendations)}")
     
     except Exception as e:
         st.error(f"Ошибка: {str(e)}")
@@ -281,6 +366,6 @@ else:
     st.info("👈 Загрузите файл для начала работы")
     st.subheader("📋 Инструкция:")
     steps = ["Загрузите CSV/Excel файл", "Настройте колонки данных", "Выберите источники признаков", 
-             "Введите параметры новой модели", "Получите рекомендации"]
+             "Введите параметры новой модели", "Получите рекомендации с анализом похожих товаров"]
     for i, step in enumerate(steps, 1):
         st.write(f"{i}. {step}")
