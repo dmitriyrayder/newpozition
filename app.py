@@ -269,12 +269,17 @@ if uploaded_file is not None:
         
         with st.expander("📋 Отчет о качестве данных"):
             # Создаем горизонтальную таблицу
-            quality_df = pd.DataFrame(quality_report).T
-            quality_df.columns = ['Пропуски (%)', 'Уникальные значения', 'Тип данных']
-            quality_df['Пропуски (%)'] = quality_df['missing_percentage'].round(1)
-            quality_df['Уникальные значения'] = quality_df['unique_values']
-            quality_df['Тип данных'] = quality_df['data_type']
-            quality_df = quality_df[['Пропуски (%)', 'Уникальные значения', 'Тип данных']]
+            quality_data = []
+            for col_name, stats in quality_report.items():
+                quality_data.append({
+                    'Колонка': col_name.upper(),
+                    'Пропуски (%)': f"{stats['missing_percentage']:.1f}%",
+                    'Уникальные значения': stats['unique_values'],
+                    'Тип данных': stats['data_type']
+                })
+            
+            quality_df = pd.DataFrame(quality_data)
+            quality_df = quality_df.set_index('Колонка')
             
             st.dataframe(quality_df, use_container_width=True)
         
@@ -403,11 +408,17 @@ if uploaded_file is not None:
                     
                     if additional_feature_1 != "Не использовать":
                         # Показываем уникальные значения из выбранной колонки
-                        unique_values_1 = df[additional_feature_1].dropna().unique()[:10]  # Показываем первые 10
-                        new_additional_1 = st.selectbox(
-                            f"Значение для '{additional_feature_1}':",
-                            options=list(unique_values_1)
-                        )
+                        try:
+                            unique_values_1 = df[additional_feature_1].dropna().unique()
+                            if len(unique_values_1) > 10:
+                                unique_values_1 = unique_values_1[:10]  # Показываем первые 10
+                            unique_values_1 = [str(val) for val in unique_values_1]  # Конвертируем в строки
+                            new_additional_1 = st.selectbox(
+                                f"Значение для '{additional_feature_1}':",
+                                options=unique_values_1
+                            )
+                        except Exception as e:
+                            st.warning(f"Не удалось загрузить значения для колонки '{additional_feature_1}'")
                 
                 with col2:
                     additional_feature_2 = st.selectbox(
@@ -418,11 +429,17 @@ if uploaded_file is not None:
                     
                     if additional_feature_2 != "Не использовать":
                         # Показываем уникальные значения из выбранной колонки
-                        unique_values_2 = df[additional_feature_2].dropna().unique()[:10]  # Показываем первые 10
-                        new_additional_2 = st.selectbox(
-                            f"Значение для '{additional_feature_2}':",
-                            options=list(unique_values_2)
-                        )
+                        try:
+                            unique_values_2 = df[additional_feature_2].dropna().unique()
+                            if len(unique_values_2) > 10:
+                                unique_values_2 = unique_values_2[:10]  # Показываем первые 10
+                            unique_values_2 = [str(val) for val in unique_values_2]  # Конвертируем в строки
+                            new_additional_2 = st.selectbox(
+                                f"Значение для '{additional_feature_2}':",
+                                options=unique_values_2
+                            )
+                        except Exception as e:
+                            st.warning(f"Не удалось загрузить значения для колонки '{additional_feature_2}'")
                 
                 # Третья дополнительная характеристика
                 if len(additional_columns) > 2:
@@ -433,11 +450,17 @@ if uploaded_file is not None:
                     )
                     
                     if additional_feature_3 != "Не использовать":
-                        unique_values_3 = df[additional_feature_3].dropna().unique()[:10]
-                        new_additional_3 = st.selectbox(
-                            f"Значение для '{additional_feature_3}':",
-                            options=list(unique_values_3)
-                        )
+                        try:
+                            unique_values_3 = df[additional_feature_3].dropna().unique()
+                            if len(unique_values_3) > 10:
+                                unique_values_3 = unique_values_3[:10]
+                            unique_values_3 = [str(val) for val in unique_values_3]  # Конвертируем в строки
+                            new_additional_3 = st.selectbox(
+                                f"Значение для '{additional_feature_3}':",
+                                options=unique_values_3
+                            )
+                        except Exception as e:
+                            st.warning(f"Не удалось загрузить значения для колонки '{additional_feature_3}'")
             else:
                 st.info("Все доступные колонки уже используются в основных характеристиках.")
         
