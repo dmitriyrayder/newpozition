@@ -268,11 +268,15 @@ if uploaded_file is not None:
         quality_report = validate_data_quality(df, selected_columns)
         
         with st.expander("📋 Отчет о качестве данных"):
-            for col_name, stats in quality_report.items():
-                st.write(f"**{col_name.upper()}:**")
-                st.write(f"- Пропущенных значений: {stats['missing_percentage']:.1f}%")
-                st.write(f"- Уникальных значений: {stats['unique_values']}")
-                st.write(f"- Тип данных: {stats['data_type']}")
+            # Создаем горизонтальную таблицу
+            quality_df = pd.DataFrame(quality_report).T
+            quality_df.columns = ['Пропуски (%)', 'Уникальные значения', 'Тип данных']
+            quality_df['Пропуски (%)'] = quality_df['missing_percentage'].round(1)
+            quality_df['Уникальные значения'] = quality_df['unique_values']
+            quality_df['Тип данных'] = quality_df['data_type']
+            quality_df = quality_df[['Пропуски (%)', 'Уникальные значения', 'Тип данных']]
+            
+            st.dataframe(quality_df, use_container_width=True)
         
         # Блок извлечения признаков
         st.subheader("🎨 Настройка признаков товара")
@@ -376,16 +380,66 @@ if uploaded_file is not None:
             
             new_uv_protection = st.checkbox("🛡️ UV защита")
         
-        # Дополнительные характеристики
+        # Дополнительные характеристики на основе загруженного датасета
         with st.expander("📋 Дополнительные характеристики"):
-            new_collection_year = st.number_input("📅 Год коллекции:", 
-                                                min_value=2020, max_value=2025, value=2024)
+            st.write("Выберите дополнительные колонки из вашего датасета для более точных рекомендаций:")
             
-            new_target_season = st.selectbox("🌞 Целевой сезон запуска:", 
-                                           ["Весна", "Лето", "Осень", "Зима"])
+            # Получаем все доступные колонки, исключая уже выбранные основные
+            used_columns = [col_magazin, col_date, col_art, col_price, col_qty]
+            if col_describe != "Не использовать":
+                used_columns.append(col_describe)
             
-            new_custom_description = st.text_area("📝 Дополнительное описание:", 
-                                                placeholder="Введите любые дополнительные характеристики...")
+            additional_columns = [col for col in available_columns if col not in used_columns]
+            
+            if additional_columns:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    additional_feature_1 = st.selectbox(
+                        "Дополнительная характеристика 1:",
+                        options=["Не использовать"] + additional_columns,
+                        help="Выберите колонку из вашего датасета"
+                    )
+                    
+                    if additional_feature_1 != "Не использовать":
+                        # Показываем уникальные значения из выбранной колонки
+                        unique_values_1 = df[additional_feature_1].dropna().unique()[:10]  # Показываем первые 10
+                        new_additional_1 = st.selectbox(
+                            f"Значение для '{additional_feature_1}':",
+                            options=list(unique_values_1)
+                        )
+                
+                with col2:
+                    additional_feature_2 = st.selectbox(
+                        "Дополнительная характеристика 2:",
+                        options=["Не использовать"] + additional_columns,
+                        help="Выберите вторую колонку из вашего датасета"
+                    )
+                    
+                    if additional_feature_2 != "Не использовать":
+                        # Показываем уникальные значения из выбранной колонки
+                        unique_values_2 = df[additional_feature_2].dropna().unique()[:10]  # Показываем первые 10
+                        new_additional_2 = st.selectbox(
+                            f"Значение для '{additional_feature_2}':",
+                            options=list(unique_values_2)
+                        )
+                
+                # Третья дополнительная характеристика
+                if len(additional_columns) > 2:
+                    additional_feature_3 = st.selectbox(
+                        "Дополнительная характеристика 3:",
+                        options=["Не использовать"] + additional_columns,
+                        help="Выберите третью колонку из вашего датасета"
+                    )
+                    
+                    if additional_feature_3 != "Не использовать":
+                        unique_values_3 = df[additional_feature_3].dropna().unique()[:10]
+                        new_additional_3 = st.selectbox(
+                            f"Значение для '{additional_feature_3}':",
+                            options=list(unique_values_3)
+                        )
+            else:
+                st.info("Все доступные колонки уже используются в основных характеристиках.")
         
         # Система рекомендаций
         if st.button("🎯 ПОДОБРАТЬ МАГАЗИНЫ", type="primary"):
