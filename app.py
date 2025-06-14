@@ -265,23 +265,37 @@ if uploaded_file is not None:
             'количество': col_qty
         }
         
-        quality_report = validate_data_quality(df, selected_columns)
-        
         with st.expander("📋 Отчет о качестве данных"):
-            # Создаем горизонтальную таблицу
-            quality_data = []
-            for col_name, stats in quality_report.items():
-                quality_data.append({
-                    'Колонка': col_name.upper(),
-                    'Пропуски (%)': f"{stats['missing_percentage']:.1f}%",
-                    'Уникальные значения': stats['unique_values'],
-                    'Тип данных': stats['data_type']
-                })
-            
-            quality_df = pd.DataFrame(quality_data)
-            quality_df = quality_df.set_index('Колонка')
-            
-            st.dataframe(quality_df, use_container_width=True)
+            try:
+                # Создаем отчет напрямую без функции
+                quality_data = []
+                for col_name, col in selected_columns.items():
+                    if col in df.columns:
+                        missing_pct = df[col].isnull().sum() / len(df) * 100
+                        unique_vals = df[col].nunique()
+                        data_type = str(df[col].dtype)
+                        
+                        quality_data.append({
+                            'Колонка': col_name.upper(),
+                            'Пропуски (%)': f"{missing_pct:.1f}%",
+                            'Уникальные значения': unique_vals,
+                            'Тип данных': data_type
+                        })
+                
+                if quality_data:
+                    quality_df = pd.DataFrame(quality_data)
+                    quality_df = quality_df.set_index('Колонка')
+                    st.dataframe(quality_df, use_container_width=True)
+                else:
+                    st.warning("Не удалось создать отчет о качестве данных")
+                    
+            except Exception as e:
+                st.error(f"Ошибка при создании отчета о качестве данных: {str(e)}")
+                # Показываем базовую информацию
+                st.write("**Базовая информация о данных:**")
+                st.write(f"- Всего строк: {len(df)}")
+                st.write(f"- Всего колонок: {len(df.columns)}")
+                st.write(f"- Колонки: {', '.join(df.columns.tolist())}")
         
         # Блок извлечения признаков
         st.subheader("🎨 Настройка признаков товара")
