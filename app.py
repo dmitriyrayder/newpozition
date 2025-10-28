@@ -49,7 +49,12 @@ class RecommendationEngine:
     def __init__(self, df, new_features, feature_weights=None):
         self.df = df
         self.new_features = new_features
+        # ВИПРАВЛЕНО: нормалізація ваг до суми 1.0
         self.weights = feature_weights or {'price': 0.25, 'gender': 0.20, 'material': 0.20, 'shape': 0.20, 'segment': 0.15}
+        # Перевірка та нормалізація ваг
+        weights_sum = sum(self.weights.values())
+        if abs(weights_sum - 1.0) > 0.01:  # Якщо сума не дорівнює 1.0
+            self.weights = {k: v/weights_sum for k, v in self.weights.items()}
         self.stores = df['store'].unique()
     
     def calculate_compatibility(self, store_data):
@@ -59,8 +64,12 @@ class RecommendationEngine:
         # Совместимость по цене
         if not store_data.empty and 'price' in store_data.columns:
             avg_price = store_data['price'].mean()
-            price_diff = abs(self.new_features['price'] - avg_price) / max(avg_price, 1)
-            scores['price'] = max(0.2, 1 - min(price_diff, 1.0))
+            # ВИПРАВЛЕНО: обробка випадку avg_price = 0
+            if avg_price > 0:
+                price_diff = abs(self.new_features['price'] - avg_price) / avg_price
+                scores['price'] = max(0.2, 1 - min(price_diff, 1.0))
+            else:
+                scores['price'] = 0.5  # Нейтральна оцінка, якщо немає даних про ціни
         else:
             scores['price'] = 0.5
         
@@ -74,7 +83,8 @@ class RecommendationEngine:
                     feature_counts = store_data[feature].value_counts()
                     if self.new_features[feature] in feature_counts.index:
                         share = feature_counts[self.new_features[feature]] / len(store_data)
-                        scores[feature] = min(1.0, share * 2)
+                        # ВИПРАВЛЕНО: більш логічна формула з обмеженням
+                        scores[feature] = max(0.3, min(1.0, 0.5 + share * 1.5))
                     else:
                         scores[feature] = 0.3
             else:
@@ -140,7 +150,9 @@ class RecommendationEngine:
         overall_compatibility = sum(compatibility_scores[k] * self.weights.get(k, 0) 
                                   for k in compatibility_scores.keys())
         
-        return max(5, predicted * overall_compatibility)
+        # ВИПРАВЛЕНО: адаптивний мінімум залежно від сумісності
+        min_sales = 5 if overall_compatibility > 0.5 else 2
+        return max(min_sales, predicted * overall_compatibility)
     
     def generate_recommendations(self):
         """Генерация рекомендаций для всех магазинов"""
@@ -160,94 +172,44 @@ class RecommendationEngine:
                 'predicted_sales': predicted_sales,
                 'compatibility': overall_compatibility,
                 'scores': compatibility_scores,
-                'avg_price': store_data['price'].mean() if not store_data.empty else self.new_features['price'],
-                'total_items': len(store_data),
-                'unique_articles': store_data['article'].nunique() if not store_data.empty else 0,
                 'profile_sales': profile_sales,
-                'profile_articles': profile_articles
+                'unique_articles': profile_articles
             })
         
         return sorted(recommendations, key=lambda x: x['predicted_sales'], reverse=True)
 
-def display_model_profile(new_features):
-    """Отображение профиля новой модели"""
-    st.markdown('<div class="profile-card">', unsafe_allow_html=True)
-    st.markdown("### 🎯 Профиль новой модели")
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(f"**💰 Цена:** {new_features['price']:,} ₽")
-        st.markdown(f"**👤 Пол:** {new_features['gender']}")
-    with col2:
-        st.markdown(f"**🔧 Материал:** {new_features['material']}")
-        st.markdown(f"**🕶️ Форма:** {new_features['shape']}")
-    with col3:
-        st.markdown(f"**🏷️ Бренд:** {new_features['brand']}")
-        st.markdown(f"**💎 Сегмент:** {new_features['segment']}")
-    
-    st.markdown('</div>', unsafe_allow_html=True)
-
 def display_recommendations(recommendations, new_features):
-    """Отображение рекомендаций с оптимизированным интерфейсом"""
-    # Отображаем профиль модели
-    display_model_profile(new_features)
+    """Вывод рекомендаций с детальным анализом"""
+    if not recommendations:
+        st.warning("Нет данных для отображения рекомендаций")
+        return
     
-    st.subheader("🏆 Рекомендуемые магазины")
+    st.subheader(f"🎯 Топ-{min(10, len(recommendations))} магазинов для размещения")
     
-    # Топ-10 рекомендаций
-    top_recs = recommendations[:min(10, len(recommendations))]
-    
-    for i, rec in enumerate(top_recs):
-        # Определение статуса
-        if rec['compatibility'] >= 0.8:
-            status, color = "🟢 Отлично", "success"
-        elif rec['compatibility'] >= 0.6:
-            status, color = "🟡 Хорошо", "warning"
-        else:
-            status, color = "🔴 Удовлетворительно", "error"
-        
-        # Заголовок с информацией о похожих товарах
-        profile_info = ""
-        if rec['profile_sales'] > 0:
-            profile_info = f" | Продажи похожих: {rec['profile_sales']:.0f} шт ({rec['profile_articles']} товаров)"
-        
-        with st.expander(f"#{i+1} {rec['store']} - {status} - Прогноз: {rec['predicted_sales']:.0f} шт/месяц{profile_info}"):
-            
-            # Основные метрики в две строки
-            col1, col2, col3, col4, col5 = st.columns(5)
-            with col1: st.metric("📈 Прогноз продаж", f"{rec['predicted_sales']:.0f} шт/мес")
-            with col2: st.metric("🎯 Совместимость", f"{rec['compatibility']:.1%}")
-            with col3: st.metric("💰 Средняя цена", f"{rec['avg_price']:.0f} ₽")
-            with col4: st.metric("📦 Всего товаров", f"{rec['unique_articles']}")
-            with col5: st.metric("🎪 Похожие продажи", f"{rec['profile_sales']:.0f} шт")
-            
-            # Информация о профиле товаров
-            if rec['profile_sales'] > 0:
-                st.success(f"✅ В магазине уже продается {rec['profile_articles']} товаров с похожим профилем общим объемом {rec['profile_sales']:.0f} штук")
-            else:
-                st.warning("⚠️ В магазине нет товаров с точно таким профилем, прогноз основан на общей статистике")
-            
-            # Критерии совместимости с профилем
-            st.markdown("**🎯 Соответствие профилю модели:**")
-            criteria_map = {'price': '💰 Цена', 'gender': '👤 Пол', 'material': '🔧 Материал', 
-                          'shape': '🕶️ Форма', 'brand': '🏷️ Бренд', 'segment': '💎 Сегмент'}
-            
-            compatibility_data = []
-            for criterion, score in rec['scores'].items():
-                if criterion in new_features:  # Показываем только выбранные признаки
-                    profile_value = new_features[criterion]
-                    if criterion == 'price':
-                        profile_value = f"{profile_value:,} ₽"
-                    
-                    compatibility_data.append({
-                        'Критерий': criteria_map.get(criterion, criterion),
-                        'Значение профиля': profile_value,
-                        'Совместимость': f"{score:.1%}",
-                        'Оценка': "Отлично" if score >= 0.8 else "Хорошо" if score >= 0.6 else "Слабо"
-                    })
-            
-            if compatibility_data:
-                st.dataframe(pd.DataFrame(compatibility_data), use_container_width=True, hide_index=True)
+    for i, rec in enumerate(recommendations[:10], 1):
+        with st.expander(f"#{i} | {rec['store']} — Прогноз: {rec['predicted_sales']:.0f} шт/месяц | Совместимость: {rec['compatibility']:.1%}"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>📈 {rec['predicted_sales']:.0f}</h3>
+                    <p>Прогноз продаж/месяц</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with col2:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>🎯 {rec['compatibility']:.1%}</h3>
+                    <p>Совместимость</p>
+                </div>
+                """, unsafe_allow_html=True)
+            with col3:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <h3>📦 {rec['profile_sales']:.0f}</h3>
+                    <p>Продажи похожих</p>
+                </div>
+                """, unsafe_allow_html=True)
             
             # Анализ причин рекомендации
             reasons = []
@@ -257,7 +219,7 @@ def display_recommendations(recommendations, new_features):
                 if criterion in new_features:
                     if score > 0.7:
                         if criterion == 'price':
-                            reasons.append("✅ Отличная совместимость по цене с ассортimentом магазина")
+                            reasons.append("✅ Отличная совместимость по цене с ассортиментом магазина")  # ВИПРАВЛЕНО
                         elif criterion == 'gender':
                             reasons.append(f"✅ Высокий спрос в магазине на {new_features['gender'].lower()} товары")
                         elif criterion == 'material':
